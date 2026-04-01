@@ -1,0 +1,22 @@
+{
+  "name": "nexusrecall",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/pg": "^8.20.0",
+    "typescript": "^6.0.2"
+  },
+  "dependencies": {
+    "ioredis": "^5.10.1",
+    "pg": "^8.20.0"
+  }
+}
