@@ -567,6 +567,16 @@ All keys must match the exact patterns specified in architecture §3.5. No varia
 
 **Cache invalidation is mandatory on every write.** Any operation that creates, updates, or deletes a `memories` record for a given `(userId, personaId)` scope must call `invalidateRetrievalCache(userId, personaId)` before the operation resolves. This applies to: memory creation, memory update (feedback, inhibition), memory deletion, and async promotion in the ingestion pipeline. Deferring or omitting invalidation for performance reasons is not permitted — it is an architectural violation.
 
+Auxiliary key pattern allowed:
+
+rcache-scope:{internal_user_id}:{persona_id}
+
+Purpose:
+Tracks retrieval cache keys per scope to enable targeted invalidation.
+
+Constraint:
+Must only be used internally within memory/cache.
+
 ### Migration Expectations
 
 - Exactly one migration file for Phase 1: `001_initial_schema.sql`
