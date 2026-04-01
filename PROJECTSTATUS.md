@@ -27,4 +27,22 @@
 **Notes:**
 
 * Implemented strictly per contract
-* No ingestion or background processing added
+* No Phase 2 or Phase 3 features added
+
+## Phase 1 — S03 (Service, Ingestion, and Queue)
+
+**Status:** COMPLETE
+
+**Completed:**
+
+* [ ] Service layer methods implemented for S03 scope
+* [ ] Ingestion module implemented
+* [ ] Queue client and worker implemented
+* [ ] DB client and query modules implemented
+* [ ] Async job flow operational for classify-turn, embed-and-promote, and bookkeeping
+* [ ] S03 stubs implemented for pruneMemory and summarizeSession
+
+**Notes:**
+
+* Implemented strictly per implementation contract
+* No Phase 2 or Phase 3 features added

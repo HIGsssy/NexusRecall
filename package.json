@@ -16,6 +16,7 @@
     "typescript": "^6.0.2"
   },
   "dependencies": {
+    "bullmq": "^5.72.0",
     "ioredis": "^5.10.1",
     "pg": "^8.20.0"
   }
