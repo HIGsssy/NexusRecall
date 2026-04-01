@@ -28,6 +28,27 @@ export async function insertConfirmedSemanticMemory(
   return result.rows[0].id as string;
 }
 
+export async function insertConfirmedEpisodicMemory(
+  internalUserId: string,
+  personaId: string,
+  content: string,
+  embedding: EmbeddingVector,
+  importance: number,
+  confidence: 'explicit' | 'inferred',
+  volatility: 'factual' | 'subjective'
+): Promise<string> {
+  const vectorStr = `[${embedding.join(',')}]`;
+  const result = await pool.query(
+    `INSERT INTO memories (
+       internal_user_id, persona_id, memory_type, content, embedding,
+       importance, confidence, volatility, status, graduation_status, strength
+     ) VALUES ($1, $2, 'episodic', $3, $4::vector, $5, $6, $7, 'active', 'confirmed', 1.0)
+     RETURNING id`,
+    [internalUserId, personaId, content, vectorStr, importance, confidence, volatility]
+  );
+  return result.rows[0].id as string;
+}
+
 export async function updateMemoryByScope(
   memoryId: string,
   internalUserId: string,

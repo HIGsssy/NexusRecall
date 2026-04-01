@@ -9,6 +9,7 @@ import { ingestionQueue } from '../../queue/client';
 import { insertExchange, getExchangeById } from '../../db/queries/exchanges';
 import {
   insertConfirmedSemanticMemory,
+  insertConfirmedEpisodicMemory,
   updateBookkeeping,
   updateMemoryByScope,
   deleteAllUserDataFromDb,
@@ -18,6 +19,7 @@ import { embed } from '../embedding';
 import type {
   IngestionInput,
   IngestionAck,
+  MemoryType,
   PruneScope,
   UpdateMemoryInput,
   UpdateMemoryResult,
@@ -36,6 +38,7 @@ interface EmbedAndPromoteData {
   userId: string;
   personaId: string;
   content: string;
+  memoryType: MemoryType;
 }
 
 interface BookkeepingData {
@@ -157,13 +160,22 @@ async function handleClassifyTurn(data: ClassifyTurnData): Promise<void> {
     throw new Error(`Exchange not found: ${data.exchangeId}`);
   }
 
-  // Rule-based classification: non-empty assistant turns are promotable
+  // Rule-based classification stub (S04): assistant → semantic, user ≥ 50 chars → episodic
   if (exchange.role === 'assistant' && exchange.content.trim().length > 0) {
     await ingestionQueue.add('embed-and-promote', {
       exchangeId: exchange.id,
       userId: data.userId,
       personaId: data.personaId,
       content: exchange.content,
+      memoryType: 'semantic',
+    } satisfies EmbedAndPromoteData);
+  } else if (exchange.role === 'user' && exchange.content.length >= 50) {
+    await ingestionQueue.add('embed-and-promote', {
+      exchangeId: exchange.id,
+      userId: data.userId,
+      personaId: data.personaId,
+      content: exchange.content,
+      memoryType: 'episodic',
     } satisfies EmbedAndPromoteData);
   }
 }
@@ -171,15 +183,27 @@ async function handleClassifyTurn(data: ClassifyTurnData): Promise<void> {
 async function handleEmbedAndPromote(data: EmbedAndPromoteData): Promise<void> {
   const embedding = await embed(data.content);
 
-  await insertConfirmedSemanticMemory(
-    data.userId,
-    data.personaId,
-    data.content,
-    embedding,
-    0.5,
-    'inferred',
-    'subjective'
-  );
+  if (data.memoryType === 'episodic') {
+    await insertConfirmedEpisodicMemory(
+      data.userId,
+      data.personaId,
+      data.content,
+      embedding,
+      0.5,
+      'inferred',
+      'subjective'
+    );
+  } else {
+    await insertConfirmedSemanticMemory(
+      data.userId,
+      data.personaId,
+      data.content,
+      embedding,
+      0.5,
+      'inferred',
+      'subjective'
+    );
+  }
 
   await invalidateRetrievalCache(data.userId, data.personaId);
 }

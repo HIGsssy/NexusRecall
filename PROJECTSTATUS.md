@@ -65,3 +65,27 @@
 * Cache interface: `setRetrievalCache` and `setEmbedding` parameters corrected to `ttlMs`
 * Cache invalidation: scoped invalidation via secondary Redis SET per `(userId, personaId)`
 * Stub log shapes: `prune-scope` and `summarize-session` stubs now emit contract-specified fields
+
+## Phase 2 — S04 (Episodic Memory Enablement)
+
+**Status:** COMPLETE
+
+**Completed:**
+
+* [x] `EmbedAndPromoteData` extended with required `memoryType: MemoryType` field
+* [x] `handleClassifyTurn` updated: assistant → semantic, user ≥ 50 chars → episodic, user < 50 chars → discard
+* [x] `insertConfirmedEpisodicMemory` added to `src/db/queries/memories.ts`
+* [x] `handleEmbedAndPromote` routes to correct insert function based on `memoryType`
+* [x] Retrieval pipeline verified: episodic memories handled by existing per-type thresholds, type caps (max 2 episodic), and intent alignment (no exclusion)
+
+**Files changed:**
+
+* `src/memory/ingestion/index.ts` — classification stub, job payload, embed-and-promote routing
+* `src/db/queries/memories.ts` — episodic insert function
+
+**Boundary compliance:**
+
+* No changes to `memory/service`, `memory/cache`, `memory/embedding`, or `memory/retrieval`
+* No schema migrations
+* No new config variables
+* No new modules or dependencies
