@@ -3,6 +3,7 @@
 // Nexus Recall Phase 1 — S03
 // ============================================================
 
+import type { PoolClient } from 'pg';
 import { pool } from '../client';
 import type { Exchange } from '../../memory/models';
 
@@ -60,4 +61,25 @@ export async function deleteExchangesByUserId(userId: string): Promise<void> {
     `DELETE FROM exchanges WHERE internal_user_id = $1`,
     [userId]
   );
+}
+
+export async function deleteExchangesByUserIdTx(
+  client: PoolClient,
+  userId: string
+): Promise<void> {
+  await client.query(
+    'DELETE FROM exchanges WHERE internal_user_id = $1',
+    [userId]
+  );
+}
+
+export async function getDistinctExchangePersonaIdsTx(
+  client: PoolClient,
+  userId: string
+): Promise<string[]> {
+  const result = await client.query(
+    'SELECT DISTINCT persona_id FROM exchanges WHERE internal_user_id = $1',
+    [userId]
+  );
+  return result.rows.map((r: { persona_id: string }) => r.persona_id);
 }

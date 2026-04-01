@@ -35,7 +35,7 @@ export const redisConnection = parseRedisUrl(config.redisUrl);
 export const ingestionQueue = new Queue('memory-ingestion', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 4,
+    attempts: 3,
     backoff: {
       type: 'exponential',
       delay: 1000,

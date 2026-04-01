@@ -1,5 +1,5 @@
 // ============================================================
-// memory/cache — Redis retrieval cache (basic get/set)
+// memory/cache — All Redis interactions
 // Nexus Recall Phase 1 — S02
 // ============================================================
 
@@ -26,6 +26,10 @@ function buildCacheKey(key: RetrievalCacheKey): string {
   return `rcache:${hash}`;
 }
 
+function buildScopeKey(userId: string, personaId: string): string {
+  return `rcache-scope:${userId}:${personaId}`;
+}
+
 // --- Public Interface ---
 
 export async function getRetrievalCache(
@@ -42,10 +46,14 @@ export async function getRetrievalCache(
 export async function setRetrievalCache(
   key: RetrievalCacheKey,
   result: RetrievalResult,
-  ttlSeconds: number
+  ttlMs: number
 ): Promise<void> {
   const cacheKey = buildCacheKey(key);
+  const ttlSeconds = Math.ceil(ttlMs / 1000);
   await redis.setex(cacheKey, ttlSeconds, JSON.stringify(result));
+  const scopeKey = buildScopeKey(key.userId, key.personaId);
+  await redis.sadd(scopeKey, cacheKey);
+  await redis.expire(scopeKey, 3600);
 }
 
 // --- Retrieval Cache Invalidation ---
@@ -54,22 +62,12 @@ export async function invalidateRetrievalCache(
   userId: string,
   personaId: string
 ): Promise<void> {
-  void userId;
-  void personaId;
-  let cursor = '0';
-  do {
-    const [nextCursor, keys] = await redis.scan(
-      cursor,
-      'MATCH',
-      'rcache:*',
-      'COUNT',
-      100
-    );
-    cursor = nextCursor;
-    if (keys.length > 0) {
-      await redis.del(...keys);
-    }
-  } while (cursor !== '0');
+  const scopeKey = buildScopeKey(userId, personaId);
+  const keys = await redis.smembers(scopeKey);
+  if (keys.length > 0) {
+    await redis.del(...keys);
+  }
+  await redis.del(scopeKey);
 }
 
 // --- Cooldown ---
@@ -122,8 +120,9 @@ export async function getEmbedding(
 export async function setEmbedding(
   textHash: string,
   vector: EmbeddingVector,
-  ttlSeconds: number
+  ttlMs: number
 ): Promise<void> {
+  const ttlSeconds = Math.ceil(ttlMs / 1000);
   await redis.setex(`emb:${textHash}`, ttlSeconds, JSON.stringify(vector));
 }
 
@@ -136,22 +135,14 @@ export async function deleteUserRedisState(
 ): Promise<void> {
   for (const personaId of personaIds) {
     await redis.del(`working:${userId}:${personaId}`);
+    const scopeKey = buildScopeKey(userId, personaId);
+    const keys = await redis.smembers(scopeKey);
+    if (keys.length > 0) {
+      await redis.del(...keys);
+    }
+    await redis.del(scopeKey);
   }
   for (const memoryId of memoryIds) {
     await redis.del(`cooldown:${memoryId}`);
   }
-  let cursor = '0';
-  do {
-    const [nextCursor, keys] = await redis.scan(
-      cursor,
-      'MATCH',
-      'rcache:*',
-      'COUNT',
-      100
-    );
-    cursor = nextCursor;
-    if (keys.length > 0) {
-      await redis.del(...keys);
-    }
-  } while (cursor !== '0');
 }

@@ -4,6 +4,7 @@
 // ============================================================
 
 import { pool } from '../client';
+import { deleteExchangesByUserIdTx, getDistinctExchangePersonaIdsTx } from './exchanges';
 import type { EmbeddingVector } from '../../memory/models';
 
 export async function insertConfirmedSemanticMemory(
@@ -79,6 +80,27 @@ export async function updateBookkeeping(
   );
 }
 
+export async function fetchCandidates(
+  userId: string,
+  personaId: string,
+  queryEmbedding: EmbeddingVector,
+  limit: number
+): Promise<Record<string, unknown>[]> {
+  const vectorStr = `[${queryEmbedding.join(',')}]`;
+  const result = await pool.query(
+    `SELECT id, memory_type, content, embedding, importance, confidence,
+            volatility, status, graduation_status, strength, cooldown_until,
+            inhibited, created_at, last_accessed_at
+     FROM memories
+     WHERE internal_user_id = $1
+       AND persona_id = $2
+     ORDER BY embedding <-> $3::vector
+     LIMIT $4`,
+    [userId, personaId, vectorStr, limit]
+  );
+  return result.rows as Record<string, unknown>[];
+}
+
 export async function deleteAllUserDataFromDb(
   userId: string
 ): Promise<{ personaIds: string[]; memoryIds: string[] }> {
@@ -86,18 +108,18 @@ export async function deleteAllUserDataFromDb(
   try {
     await client.query('BEGIN');
 
-    const personaResult = await client.query(
-      `SELECT DISTINCT persona_id FROM memories WHERE internal_user_id = $1
-       UNION
-       SELECT DISTINCT persona_id FROM exchanges WHERE internal_user_id = $1`,
+    const memoryPersonaResult = await client.query(
+      'SELECT DISTINCT persona_id FROM memories WHERE internal_user_id = $1',
       [userId]
     );
-    const personaIds = personaResult.rows.map(
+    const memoryPersonaIds = memoryPersonaResult.rows.map(
       (r: { persona_id: string }) => r.persona_id
     );
+    const exchangePersonaIds = await getDistinctExchangePersonaIdsTx(client, userId);
+    const personaIds = [...new Set([...memoryPersonaIds, ...exchangePersonaIds])];
 
     const memoryResult = await client.query(
-      `SELECT id FROM memories WHERE internal_user_id = $1`,
+      'SELECT id FROM memories WHERE internal_user_id = $1',
       [userId]
     );
     const memoryIds = memoryResult.rows.map(
@@ -108,10 +130,7 @@ export async function deleteAllUserDataFromDb(
       'DELETE FROM memories WHERE internal_user_id = $1',
       [userId]
     );
-    await client.query(
-      'DELETE FROM exchanges WHERE internal_user_id = $1',
-      [userId]
-    );
+    await deleteExchangesByUserIdTx(client, userId);
 
     await client.query('COMMIT');
     return { personaIds, memoryIds };

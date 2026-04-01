@@ -20,7 +20,7 @@ const worker = new Worker(
 
 worker.on('failed', (job, err) => {
   if (job) {
-    const maxAttempts = job.opts?.attempts ?? 4;
+    const maxAttempts = job.opts?.attempts ?? 3;
     if (job.attemptsMade >= maxAttempts) {
       console.error(
         JSON.stringify({

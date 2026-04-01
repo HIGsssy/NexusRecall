@@ -1,14 +1,22 @@
 // ============================================================
-// memory/retrieval — Full retrieval pipeline (7 explicit stages)
-// Nexus Recall Phase 1 — S02
+// memory/retrieval — Full 8-stage retrieval pipeline
+// Nexus Recall Phase 1 — S03
 // ============================================================
 
-import { Pool } from 'pg';
+import { createHash } from 'crypto';
 import { config } from '../../config';
 import { embed } from '../embedding';
+import { fetchCandidates } from '../../db/queries/memories';
+import {
+  getRetrievalCache,
+  setRetrievalCache,
+  isOnCooldown,
+} from '../cache';
+import { enqueueBookkeeping } from '../ingestion';
 import type {
   RetrievalContext,
   RetrievalResult,
+  RetrievalCacheKey,
   MemoryObject,
   MemoryType,
   ConfidenceLevel,
@@ -16,14 +24,8 @@ import type {
   MemoryStatus,
   GraduationStatus,
   EmbeddingVector,
+  IntentType,
 } from '../models';
-
-// --- Database Pool ---
-
-const pool = new Pool({
-  connectionString: config.databaseUrl,
-  max: config.databasePoolSize,
-});
 
 // --- Internal Types ---
 
@@ -40,7 +42,6 @@ interface CandidateRow {
   strength: number;
   cooldown_until: string | null;
   inhibited: boolean;
-  access_count: number;
   created_at: string;
   last_accessed_at: string | null;
 }
@@ -75,10 +76,6 @@ function parseVector(vectorStr: string): number[] {
     .replace(/\]$/, '')
     .split(',')
     .map(Number);
-}
-
-function vectorToSql(v: number[]): string {
-  return `[${v.join(',')}]`;
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {
@@ -122,66 +119,50 @@ function transformRow(raw: Record<string, unknown>): CandidateRow {
     strength: Number(raw['strength']),
     cooldown_until: toISOStringOrNull(raw['cooldown_until']),
     inhibited: Boolean(raw['inhibited']),
-    access_count: Number(raw['access_count']),
     created_at: toISOString(raw['created_at']),
     last_accessed_at: toISOStringOrNull(raw['last_accessed_at']),
   };
 }
 
-// ============================================================
-// Pipeline Stages
-// ============================================================
-
-// --- Stage 1: Embed Query ---
-
-async function stage1EmbedQuery(queryText: string): Promise<EmbeddingVector> {
-  return embed(queryText);
+function logStage(stage: string, elapsedMs: number): void {
+  console.log(
+    JSON.stringify({
+      pipeline: 'retrieval',
+      stage,
+      elapsed_ms: elapsedMs,
+      timestamp: new Date().toISOString(),
+    })
+  );
 }
 
-// --- Stage 2: Database Query ---
-// Uses pgvector <-> (L2 distance) operator for candidate retrieval.
-// Cosine similarity is computed in application code for scoring/thresholds.
-
-async function stage2DatabaseQuery(
-  userId: string,
-  personaId: string,
-  queryEmbedding: EmbeddingVector
-): Promise<CandidateRow[]> {
-  const sql = `
-    SELECT *
-    FROM memories
-    WHERE internal_user_id = $1
-      AND persona_id = $2
-      AND status = 'active'
-    ORDER BY embedding <-> $3::vector
-    LIMIT $4
-  `;
-
-  const result = await pool.query(sql, [
-    userId,
-    personaId,
-    vectorToSql(queryEmbedding),
-    config.retrievalTopN,
-  ]);
-
-  return result.rows.map((row: Record<string, unknown>) => transformRow(row));
+function getRetrievalCacheTtlMs(intentType: IntentType): number {
+  switch (intentType) {
+    case 'task':
+      return config.retrievalCacheTtlTask * 1000;
+    case 'conversational':
+      return config.retrievalCacheTtlConv * 1000;
+    case 'emotional':
+      return config.retrievalCacheTtlEmotional * 1000;
+  }
 }
 
-// --- Stage 3: Filtering ---
-// Hard filters applied sequentially per architecture §7 Stage 4.
-// Each filter runs on the output of the previous. No reordering.
-//
+// ============================================================
+// Pipeline Stage Implementations
+// ============================================================
+
+// --- Stage 4: Hard Filtering ---
+// Applied sequentially per architecture §7 Stage 4.
 // Filter 1: Graduation gate — exclude graduation_status != 'confirmed'
 // Filter 2: Inhibition gate — exclude inhibited = true
 // Filter 3: Similarity threshold — per-type cosine similarity threshold
-// Filter 4: Cooldown gate — exclude records with active cooldown
+// Filter 4: Cooldown gate — Redis-first, DB fallback
 // Filter 5: Confidence gate — pass all (Phase 1)
 // Filter 6: Intent alignment — exclude commitment type (Phase 1)
 
-function stage3Filter(
+async function hardFilter(
   candidates: CandidateRow[],
   queryEmbedding: EmbeddingVector
-): FilteredCandidate[] {
+): Promise<FilteredCandidate[]> {
   // Filter 1: Graduation gate
   let filtered = candidates.filter(
     (c) => c.graduation_status === 'confirmed'
@@ -191,25 +172,27 @@ function stage3Filter(
   filtered = filtered.filter((c) => !c.inhibited);
 
   // Filter 3: Similarity threshold
-  // Compute cosine similarity in application code, exclude below per-type threshold
   const withSimilarity: FilteredCandidate[] = filtered.map((row) => ({
     row,
     similarity: cosineSimilarity(queryEmbedding, parseVector(row.embedding)),
   }));
 
-  let afterThreshold = withSimilarity.filter(
+  const afterThreshold = withSimilarity.filter(
     (item) => item.similarity >= getSimilarityThreshold(item.row.memory_type)
   );
 
-  // Filter 4: Cooldown gate
+  // Filter 4: Cooldown gate (Redis-first, DB fallback)
   const now = Date.now();
-  afterThreshold = afterThreshold.filter((item) => {
-    if (!item.row.cooldown_until) return true;
-    return new Date(item.row.cooldown_until).getTime() <= now;
-  });
+  const afterCooldown: FilteredCandidate[] = [];
+  for (const item of afterThreshold) {
+    const redisOnCooldown = await isOnCooldown(item.row.id);
+    if (redisOnCooldown) continue;
+    if (item.row.cooldown_until && new Date(item.row.cooldown_until).getTime() > now) continue;
+    afterCooldown.push(item);
+  }
 
   // Filter 5: Confidence gate — pass all records (Phase 1)
-  const afterConfidence = afterThreshold;
+  const afterConfidence = afterCooldown;
 
   // Filter 6: Intent alignment — exclude commitment type (Phase 1)
   const afterAlignment = afterConfidence.filter(
@@ -219,20 +202,17 @@ function stage3Filter(
   return afterAlignment;
 }
 
-// --- Stage 4: Scoring ---
+// --- Stage 5: Scoring ---
 // Score = (Similarity × 0.6) + (Recency × 0.2) + (Importance × 0.1) + (Strength × 0.1)
 // IntentAlignmentBias = 0.0 in Phase 1
 // All inputs normalized to [0, 1] before weights are applied.
 
-function stage4Score(candidates: FilteredCandidate[]): ScoredCandidate[] {
+function score(candidates: FilteredCandidate[]): ScoredCandidate[] {
   const now = Date.now();
 
   return candidates.map(({ row, similarity }) => {
-    // Similarity: cosine similarity, clamped to [0, 1]
     const normalizedSimilarity = Math.max(0, Math.min(1, similarity));
 
-    // Recency: 1 / (1 + days_since_last_access)
-    // Falls back to created_at if last_accessed_at is null
     const lastAccess = row.last_accessed_at
       ? new Date(row.last_accessed_at).getTime()
       : new Date(row.created_at).getTime();
@@ -242,36 +222,24 @@ function stage4Score(candidates: FilteredCandidate[]): ScoredCandidate[] {
     );
     const recency = 1 / (1 + daysSinceAccess);
 
-    // Importance: stored field, already in [0, 1] per DB constraint
     const importance = row.importance;
-
-    // Strength: stored field, clamped to [0, 1]
     const strength = Math.max(0, Math.min(1, row.strength));
 
-    // Composite score
-    const score =
+    const compositeScore =
       normalizedSimilarity * 0.6 +
       recency * 0.2 +
       importance * 0.1 +
       strength * 0.1;
 
-    return { row, similarity, score };
+    return { row, similarity, score: compositeScore };
   });
 }
 
-// --- Stage 5: Sorting ---
-// Sort by composite score descending.
-
-function stage5Sort(candidates: ScoredCandidate[]): ScoredCandidate[] {
-  return [...candidates].sort((a, b) => b.score - a.score);
-}
-
 // --- Stage 6: Type-Capped Selection ---
-// Greedy selection by descending score within per-type caps.
 // semantic: 2, episodic: 2, commitment: 1, self: 1
 // Maximum output: 6 memory objects.
 
-function stage6TypeCappedSelection(
+function typeCappedSelection(
   candidates: ScoredCandidate[]
 ): ScoredCandidate[] {
   const caps: Record<MemoryType, number> = {
@@ -301,59 +269,106 @@ function stage6TypeCappedSelection(
   return selected;
 }
 
-// --- Stage 7: Mapping ---
+// --- Mapping ---
 // Map internal rows to public MemoryObject interface.
-// No internal metadata (graduation_status, strength, cooldown_until, inhibited, lineage_parent_id) exposed.
 
-function stage7Map(candidates: ScoredCandidate[]): MemoryObject[] {
-  return candidates.map(({ row, score }) => ({
+function mapToMemoryObjects(candidates: ScoredCandidate[]): MemoryObject[] {
+  return candidates.map(({ row, score: s }) => ({
     id: row.id,
     memory_type: row.memory_type,
     content: row.content,
     importance: row.importance,
     confidence: row.confidence,
     volatility: row.volatility,
-    score,
+    score: s,
     created_at: row.created_at,
     last_accessed_at: row.last_accessed_at,
   }));
 }
 
 // ============================================================
-// Main Pipeline Execution
+// Main Pipeline Execution — All 8 Stages
 // ============================================================
 
 export async function execute(
   context: RetrievalContext
 ): Promise<RetrievalResult> {
-  // Stage 1: Embed Query
-  const queryEmbedding = await stage1EmbedQuery(context.query_text);
+  const intentType: IntentType = context.intent_type ?? 'conversational';
 
-  // Stage 2: Database Query
-  const candidates = await stage2DatabaseQuery(
+  // Stage 1: Cache Check
+  let start = Date.now();
+  const queryHash = createHash('sha256')
+    .update(context.query_text)
+    .digest('hex');
+  const cacheKey: RetrievalCacheKey = {
+    userId: context.internal_user_id,
+    personaId: context.persona_id,
+    embeddingHash: queryHash,
+    intentType,
+  };
+  const cached = await getRetrievalCache(cacheKey);
+  logStage('stage_1_cache_check', Date.now() - start);
+  if (cached !== null) {
+    return { ...cached, cache_hit: true };
+  }
+
+  // Stage 2: Embed Query
+  start = Date.now();
+  const queryEmbedding = await embed(context.query_text);
+  logStage('stage_2_embed_query', Date.now() - start);
+
+  // Stage 3: Candidate Retrieval
+  start = Date.now();
+  const rawRows = await fetchCandidates(
     context.internal_user_id,
     context.persona_id,
-    queryEmbedding
+    queryEmbedding,
+    config.retrievalTopN
   );
+  const candidates = rawRows.map(transformRow);
+  logStage('stage_3_candidate_retrieval', Date.now() - start);
 
-  // Stage 3: Filtering
-  const filtered = stage3Filter(candidates, queryEmbedding);
+  // Stage 4: Hard Filtering
+  start = Date.now();
+  const filtered = await hardFilter(candidates, queryEmbedding);
+  logStage('stage_4_hard_filter', Date.now() - start);
 
-  // Stage 4: Scoring
-  const scored = stage4Score(filtered);
-
-  // Stage 5: Sorting
-  const sorted = stage5Sort(scored);
+  // Stage 5: Scoring
+  start = Date.now();
+  const scored = score(filtered);
+  const sorted = [...scored].sort((a, b) => b.score - a.score);
+  logStage('stage_5_scoring', Date.now() - start);
 
   // Stage 6: Type-Capped Selection
-  const selected = stage6TypeCappedSelection(sorted);
+  start = Date.now();
+  const selected = typeCappedSelection(sorted);
+  const memories = mapToMemoryObjects(selected);
+  logStage('stage_6_type_capped_selection', Date.now() - start);
 
-  // Stage 7: Mapping
-  const memories = stage7Map(selected);
-
-  return {
+  const result: RetrievalResult = {
     memories,
     retrieved_at: new Date().toISOString(),
     cache_hit: false,
   };
+
+  // Stage 7: Post-Selection Bookkeeping (non-blocking)
+  start = Date.now();
+  if (memories.length > 0) {
+    enqueueBookkeeping(
+      memories.map((m) => m.id),
+      context.internal_user_id,
+      context.persona_id
+    ).catch(() => {
+      // Non-blocking: silently ignore enqueue failures for bookkeeping
+    });
+  }
+  logStage('stage_7_bookkeeping_enqueue', Date.now() - start);
+
+  // Stage 8: Cache Write + Return
+  start = Date.now();
+  const ttlMs = getRetrievalCacheTtlMs(intentType);
+  await setRetrievalCache(cacheKey, result, ttlMs);
+  logStage('stage_8_cache_write', Date.now() - start);
+
+  return result;
 }

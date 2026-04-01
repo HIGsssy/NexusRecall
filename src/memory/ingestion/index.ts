@@ -7,10 +7,21 @@ import type { Job } from 'bullmq';
 import { config } from '../../config';
 import { ingestionQueue } from '../../queue/client';
 import { insertExchange, getExchangeById } from '../../db/queries/exchanges';
-import { insertConfirmedSemanticMemory, updateBookkeeping } from '../../db/queries/memories';
-import { invalidateRetrievalCache, setCooldown } from '../cache';
+import {
+  insertConfirmedSemanticMemory,
+  updateBookkeeping,
+  updateMemoryByScope,
+  deleteAllUserDataFromDb,
+} from '../../db/queries/memories';
+import { invalidateRetrievalCache, setCooldown, deleteUserRedisState } from '../cache';
 import { embed } from '../embedding';
-import type { IngestionInput, IngestionAck, PruneScope } from '../models';
+import type {
+  IngestionInput,
+  IngestionAck,
+  PruneScope,
+  UpdateMemoryInput,
+  UpdateMemoryResult,
+} from '../models';
 
 // --- Job Data Shapes ---
 
@@ -91,20 +102,18 @@ export async function processJob(job: Job): Promise<void> {
     case 'prune-scope':
       console.log(
         JSON.stringify({
-          level: 'info',
-          event: 'prune_scope_stub',
-          data: job.data,
-          timestamp: new Date().toISOString(),
+          jobType: 'prune-scope',
+          status: 'stub',
+          scope: job.data,
         })
       );
       break;
     case 'summarize-session':
       console.log(
         JSON.stringify({
-          level: 'info',
-          event: 'summarize_session_stub',
-          data: job.data,
-          timestamp: new Date().toISOString(),
+          jobType: 'summarize-session',
+          status: 'stub',
+          sessionId: (job.data as { sessionId: string }).sessionId,
         })
       );
       break;
@@ -185,4 +194,29 @@ async function handleBookkeeping(data: BookkeepingData): Promise<void> {
   }
 
   await invalidateRetrievalCache(data.userId, data.personaId);
+}
+
+// --- Service Delegation Functions ---
+
+export async function performUpdate(
+  input: UpdateMemoryInput
+): Promise<UpdateMemoryResult> {
+  const updated = await updateMemoryByScope(
+    input.memory_id,
+    input.internal_user_id,
+    input.persona_id,
+    input.feedback,
+    input.inhibit
+  );
+
+  if (updated) {
+    await invalidateRetrievalCache(input.internal_user_id, input.persona_id);
+  }
+
+  return { memory_id: input.memory_id, updated };
+}
+
+export async function performDeleteUserData(userId: string): Promise<void> {
+  const { personaIds, memoryIds } = await deleteAllUserDataFromDb(userId);
+  await deleteUserRedisState(userId, personaIds, memoryIds);
 }
