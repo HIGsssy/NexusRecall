@@ -8,8 +8,7 @@ import { config } from '../../config';
 import { ingestionQueue } from '../../queue/client';
 import { insertExchange, getExchangeById } from '../../db/queries/exchanges';
 import {
-  insertConfirmedSemanticMemory,
-  insertConfirmedEpisodicMemory,
+  insertConfirmedMemory,
   updateBookkeeping,
   updateMemoryByScope,
   deleteAllUserDataFromDb,
@@ -20,6 +19,8 @@ import type {
   IngestionInput,
   IngestionAck,
   MemoryType,
+  ConfidenceLevel,
+  VolatilityLevel,
   PruneScope,
   UpdateMemoryInput,
   UpdateMemoryResult,
@@ -39,12 +40,125 @@ interface EmbedAndPromoteData {
   personaId: string;
   content: string;
   memoryType: MemoryType;
+  importance: number;
+  confidence: ConfidenceLevel;
+  volatility: VolatilityLevel;
 }
 
 interface BookkeepingData {
   memoryIds: string[];
   userId: string;
   personaId: string;
+}
+
+// --- Classification ---
+
+interface ClassificationResult {
+  memoryType: MemoryType | null;
+  importance: number;
+  confidence: ConfidenceLevel;
+  volatility: VolatilityLevel;
+}
+
+const SELF_REFERENTIAL_PATTERNS: readonly string[] = [
+  'i am a ', 'i am an ', 'i\'m a ', 'i\'m an ',
+  'i am designed', 'i am built', 'i am programmed', 'i am configured',
+  'i\'m designed', 'i\'m built', 'i\'m programmed', 'i\'m configured',
+  'i was designed', 'i was created', 'i was built', 'i was programmed',
+  'i have been designed', 'i have been programmed', 'i have been built',
+  'i prefer ', 'i can ', 'i cannot ', 'i can\'t ',
+  'my purpose', 'my role is', 'my goal is', 'my function is',
+  'as an ai', 'as a language model', 'as an assistant',
+];
+
+const GREETING_PATTERNS: readonly string[] = [
+  'hello', 'hi', 'hey', 'good morning', 'good afternoon',
+  'good evening', 'goodnight', 'good night', 'greetings',
+];
+
+const META_CONVERSATIONAL_PATTERNS: readonly string[] = [
+  'ok', 'okay', 'sure', 'thanks', 'thank you', 'you\'re welcome',
+  'no problem', 'got it', 'understood', 'i see', 'alright',
+  'sounds good', 'noted', 'absolutely', 'of course', 'certainly',
+];
+
+const HEDGING_PATTERNS: readonly string[] = [
+  'i think', 'i believe', 'probably', 'maybe', 'might',
+  'could be', 'in my opinion', 'seems', 'perhaps', 'likely',
+  'i feel', 'i guess', 'it seems', 'it appears', 'not sure',
+  'i suppose',
+];
+
+const INSTRUCTIONAL_PATTERNS: readonly string[] = [
+  'you should', 'you need to', 'you can', 'you must', 'make sure',
+  'here\'s how', 'here is how', 'follow these', 'try to',
+  'remember to', 'be sure to', 'don\'t forget', 'important to',
+];
+
+function isSelfReferential(contentLower: string): boolean {
+  return SELF_REFERENTIAL_PATTERNS.some(p => contentLower.includes(p));
+}
+
+function isQuestion(content: string): boolean {
+  return content.trimEnd().endsWith('?');
+}
+
+function isShortGreeting(contentLower: string): boolean {
+  const wordCount = contentLower.split(/\s+/).length;
+  if (wordCount > 5) return false;
+  return GREETING_PATTERNS.some(p => contentLower.includes(p));
+}
+
+function isMetaConversational(contentLower: string): boolean {
+  const wordCount = contentLower.split(/\s+/).length;
+  if (wordCount > 8) return false;
+  return META_CONVERSATIONAL_PATTERNS.some(p => contentLower.includes(p));
+}
+
+function containsHedging(contentLower: string): boolean {
+  return HEDGING_PATTERNS.some(p => contentLower.includes(p));
+}
+
+function appearsInstructional(contentLower: string): boolean {
+  return INSTRUCTIONAL_PATTERNS.some(p => contentLower.includes(p));
+}
+
+function classify(role: 'user' | 'assistant', content: string): ClassificationResult {
+  const trimmed = content.trim();
+  const lower = trimmed.toLowerCase();
+
+  if (role === 'assistant') {
+    if (trimmed.length < config.classifierMinSemanticLength) {
+      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
+    }
+
+    if (isSelfReferential(lower)) {
+      return { memoryType: 'self', importance: 0.6, confidence: 'inferred', volatility: 'subjective' };
+    }
+
+    if (isQuestion(trimmed) || isShortGreeting(lower) || isMetaConversational(lower)) {
+      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
+    }
+
+    const volatility: VolatilityLevel = containsHedging(lower) ? 'subjective' : 'factual';
+    const importance = appearsInstructional(lower) ? 0.7 : 0.5;
+
+    return { memoryType: 'semantic', importance, confidence: 'inferred', volatility };
+  }
+
+  if (role === 'user') {
+    if (trimmed.length < config.classifierMinEpisodicLength) {
+      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
+    }
+
+    if (isQuestion(trimmed)) {
+      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
+    }
+
+    return { memoryType: 'episodic', importance: 0.4, confidence: 'inferred', volatility: 'subjective' };
+  }
+
+  return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
 }
 
 // --- Public Interface ---
@@ -160,50 +274,37 @@ async function handleClassifyTurn(data: ClassifyTurnData): Promise<void> {
     throw new Error(`Exchange not found: ${data.exchangeId}`);
   }
 
-  // Rule-based classification stub (S04): assistant → semantic, user ≥ 50 chars → episodic
-  if (exchange.role === 'assistant' && exchange.content.trim().length > 0) {
-    await ingestionQueue.add('embed-and-promote', {
-      exchangeId: exchange.id,
-      userId: data.userId,
-      personaId: data.personaId,
-      content: exchange.content,
-      memoryType: 'semantic',
-    } satisfies EmbedAndPromoteData);
-  } else if (exchange.role === 'user' && exchange.content.length >= 50) {
-    await ingestionQueue.add('embed-and-promote', {
-      exchangeId: exchange.id,
-      userId: data.userId,
-      personaId: data.personaId,
-      content: exchange.content,
-      memoryType: 'episodic',
-    } satisfies EmbedAndPromoteData);
+  const result = classify(exchange.role, exchange.content);
+
+  if (result.memoryType === null) {
+    return;
   }
+
+  await ingestionQueue.add('embed-and-promote', {
+    exchangeId: exchange.id,
+    userId: data.userId,
+    personaId: data.personaId,
+    content: exchange.content,
+    memoryType: result.memoryType,
+    importance: result.importance,
+    confidence: result.confidence,
+    volatility: result.volatility,
+  } satisfies EmbedAndPromoteData);
 }
 
 async function handleEmbedAndPromote(data: EmbedAndPromoteData): Promise<void> {
   const embedding = await embed(data.content);
 
-  if (data.memoryType === 'episodic') {
-    await insertConfirmedEpisodicMemory(
-      data.userId,
-      data.personaId,
-      data.content,
-      embedding,
-      0.5,
-      'inferred',
-      'subjective'
-    );
-  } else {
-    await insertConfirmedSemanticMemory(
-      data.userId,
-      data.personaId,
-      data.content,
-      embedding,
-      0.5,
-      'inferred',
-      'subjective'
-    );
-  }
+  await insertConfirmedMemory(
+    data.userId,
+    data.personaId,
+    data.memoryType,
+    data.content,
+    embedding,
+    data.importance,
+    data.confidence,
+    data.volatility
+  );
 
   await invalidateRetrievalCache(data.userId, data.personaId);
 }

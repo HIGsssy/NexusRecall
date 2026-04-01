@@ -40,6 +40,10 @@ export interface Config {
   workingMemoryMaxTurns: number;
   workingMemoryTtlSeconds: number;
 
+  // Classification
+  classifierMinSemanticLength: number;
+  classifierMinEpisodicLength: number;
+
   // Ingestion / lifecycle
   exchangeRetentionDays: number;
 
@@ -161,6 +165,8 @@ function loadConfig(): Config {
   const cooldownDurationSeconds = parsePositiveInt('COOLDOWN_DURATION_SECONDS', process.env['COOLDOWN_DURATION_SECONDS'], 300);
   const workingMemoryMaxTurns = parsePositiveInt('WORKING_MEMORY_MAX_TURNS', process.env['WORKING_MEMORY_MAX_TURNS'], 10);
   const workingMemoryTtlSeconds = parsePositiveInt('WORKING_MEMORY_TTL_SECONDS', process.env['WORKING_MEMORY_TTL_SECONDS'], 1800);
+  const classifierMinSemanticLength = parsePositiveInt('CLASSIFIER_MIN_SEMANTIC_LENGTH', process.env['CLASSIFIER_MIN_SEMANTIC_LENGTH'], 20);
+  const classifierMinEpisodicLength = parsePositiveInt('CLASSIFIER_MIN_EPISODIC_LENGTH', process.env['CLASSIFIER_MIN_EPISODIC_LENGTH'], 50);
   const exchangeRetentionDays = parsePositiveInt('EXCHANGE_RETENTION_DAYS', process.env['EXCHANGE_RETENTION_DAYS'], 90);
 
   const similarityThresholdSemantic = parseFloatInRange('SIMILARITY_THRESHOLD_SEMANTIC', process.env['SIMILARITY_THRESHOLD_SEMANTIC'], 0.75);
@@ -190,6 +196,8 @@ function loadConfig(): Config {
     cooldownDurationSeconds,
     workingMemoryMaxTurns,
     workingMemoryTtlSeconds,
+    classifierMinSemanticLength,
+    classifierMinEpisodicLength,
     exchangeRetentionDays,
     logLevel,
   };
