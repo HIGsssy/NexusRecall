@@ -1,0 +1,9 @@
+node_modules
+harness/node_modules
+harness/client/dist
+dist
+.env
+.env.local
+.git
+.ai
+*.md
