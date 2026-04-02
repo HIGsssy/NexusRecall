@@ -12,6 +12,8 @@ import {
   updateBookkeeping,
   updateMemoryByScope,
   deleteAllUserDataFromDb,
+  findContradictionCandidates,
+  markSuperseded,
 } from '../../db/queries/memories';
 import { invalidateRetrievalCache, setCooldown, deleteUserRedisState } from '../cache';
 import { embed } from '../embedding';
@@ -161,6 +163,32 @@ function classify(role: 'user' | 'assistant', content: string): ClassificationRe
   return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
 }
 
+// --- Contradiction Helper ---
+
+const CONTRADICTION_ELIGIBLE_TYPES = new Set<MemoryType>(['semantic', 'self']);
+
+function parseVector(vectorStr: string): number[] {
+  return vectorStr
+    .replace(/^\[/, '')
+    .replace(/\]$/, '')
+    .split(',')
+    .map(Number);
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denominator === 0) return 0;
+  return dot / denominator;
+}
+
 // --- Public Interface ---
 
 export async function ingest(input: IngestionInput): Promise<IngestionAck> {
@@ -295,6 +323,34 @@ async function handleClassifyTurn(data: ClassifyTurnData): Promise<void> {
 async function handleEmbedAndPromote(data: EmbedAndPromoteData): Promise<void> {
   const embedding = await embed(data.content);
 
+  let lineageParentId: string | null = null;
+
+  // Contradiction check: only for semantic and self types
+  if (CONTRADICTION_ELIGIBLE_TYPES.has(data.memoryType)) {
+    const candidates = await findContradictionCandidates(
+      data.userId,
+      data.personaId,
+      data.memoryType as 'semantic' | 'self'
+    );
+
+    let bestId: string | null = null;
+    let bestSimilarity = -1;
+
+    for (const candidate of candidates) {
+      const candidateEmbedding = parseVector(candidate.embedding);
+      const similarity = cosineSimilarity(embedding, candidateEmbedding);
+      if (similarity > config.contradictionSimilarityThreshold && similarity > bestSimilarity) {
+        bestId = candidate.id;
+        bestSimilarity = similarity;
+      }
+    }
+
+    if (bestId !== null) {
+      await markSuperseded(bestId, data.userId, data.personaId);
+      lineageParentId = bestId;
+    }
+  }
+
   await insertConfirmedMemory(
     data.userId,
     data.personaId,
@@ -303,7 +359,8 @@ async function handleEmbedAndPromote(data: EmbedAndPromoteData): Promise<void> {
     embedding,
     data.importance,
     data.confidence,
-    data.volatility
+    data.volatility,
+    lineageParentId
   );
 
   await invalidateRetrievalCache(data.userId, data.personaId);

@@ -44,6 +44,9 @@ export interface Config {
   classifierMinSemanticLength: number;
   classifierMinEpisodicLength: number;
 
+  // Contradiction
+  contradictionSimilarityThreshold: number;
+
   // Ingestion / lifecycle
   exchangeRetentionDays: number;
 
@@ -169,6 +172,8 @@ function loadConfig(): Config {
   const classifierMinEpisodicLength = parsePositiveInt('CLASSIFIER_MIN_EPISODIC_LENGTH', process.env['CLASSIFIER_MIN_EPISODIC_LENGTH'], 50);
   const exchangeRetentionDays = parsePositiveInt('EXCHANGE_RETENTION_DAYS', process.env['EXCHANGE_RETENTION_DAYS'], 90);
 
+  const contradictionSimilarityThreshold = parseFloatInRange('CONTRADICTION_SIMILARITY_THRESHOLD', process.env['CONTRADICTION_SIMILARITY_THRESHOLD'], 0.92);
+
   const similarityThresholdSemantic = parseFloatInRange('SIMILARITY_THRESHOLD_SEMANTIC', process.env['SIMILARITY_THRESHOLD_SEMANTIC'], 0.75);
   const similarityThresholdEpisodic = parseFloatInRange('SIMILARITY_THRESHOLD_EPISODIC', process.env['SIMILARITY_THRESHOLD_EPISODIC'], 0.70);
   const similarityThresholdSelf = parseFloatInRange('SIMILARITY_THRESHOLD_SELF', process.env['SIMILARITY_THRESHOLD_SELF'], 0.72);
@@ -198,6 +203,7 @@ function loadConfig(): Config {
     workingMemoryTtlSeconds,
     classifierMinSemanticLength,
     classifierMinEpisodicLength,
+    contradictionSimilarityThreshold,
     exchangeRetentionDays,
     logLevel,
   };

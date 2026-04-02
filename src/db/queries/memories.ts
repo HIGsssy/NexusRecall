@@ -57,16 +57,18 @@ export async function insertConfirmedMemory(
   embedding: EmbeddingVector,
   importance: number,
   confidence: 'explicit' | 'inferred',
-  volatility: 'factual' | 'subjective'
+  volatility: 'factual' | 'subjective',
+  lineageParentId?: string | null
 ): Promise<string> {
   const vectorStr = `[${embedding.join(',')}]`;
   const result = await pool.query(
     `INSERT INTO memories (
        internal_user_id, persona_id, memory_type, content, embedding,
-       importance, confidence, volatility, status, graduation_status, strength
-     ) VALUES ($1, $2, $3, $4, $5::vector, $6, $7, $8, 'active', 'confirmed', 1.0)
+       importance, confidence, volatility, status, graduation_status, strength,
+       lineage_parent_id
+     ) VALUES ($1, $2, $3, $4, $5::vector, $6, $7, $8, 'active', 'confirmed', 1.0, $9)
      RETURNING id`,
-    [internalUserId, personaId, memoryType, content, vectorStr, importance, confidence, volatility]
+    [internalUserId, personaId, memoryType, content, vectorStr, importance, confidence, volatility, lineageParentId ?? null]
   );
   return result.rows[0].id as string;
 }
@@ -142,6 +144,41 @@ export async function fetchCandidates(
     [userId, personaId, vectorStr, limit]
   );
   return result.rows as Record<string, unknown>[];
+}
+
+export async function findContradictionCandidates(
+  internalUserId: string,
+  personaId: string,
+  memoryType: 'semantic' | 'self'
+): Promise<{ id: string; embedding: string }[]> {
+  const result = await pool.query(
+    `SELECT id, embedding
+     FROM memories
+     WHERE internal_user_id = $1
+       AND persona_id = $2
+       AND memory_type = $3
+       AND status = 'active'
+       AND graduation_status = 'confirmed'`,
+    [internalUserId, personaId, memoryType]
+  );
+  return result.rows as { id: string; embedding: string }[];
+}
+
+export async function markSuperseded(
+  memoryId: string,
+  internalUserId: string,
+  personaId: string
+): Promise<string | null> {
+  const result = await pool.query(
+    `UPDATE memories SET status = 'superseded'
+     WHERE id = $1 AND internal_user_id = $2 AND persona_id = $3
+     RETURNING id`,
+    [memoryId, internalUserId, personaId]
+  );
+  if (result.rowCount !== null && result.rowCount > 0) {
+    return result.rows[0].id as string;
+  }
+  return null;
 }
 
 export async function deleteAllUserDataFromDb(

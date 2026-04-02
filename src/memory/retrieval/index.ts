@@ -163,9 +163,9 @@ async function hardFilter(
   candidates: CandidateRow[],
   queryEmbedding: EmbeddingVector
 ): Promise<FilteredCandidate[]> {
-  // Filter 1: Graduation gate
+  // Filter 1: Graduation gate + status check
   let filtered = candidates.filter(
-    (c) => c.graduation_status === 'confirmed'
+    (c) => c.graduation_status === 'confirmed' && c.status === 'active'
   );
 
   // Filter 2: Inhibition gate
