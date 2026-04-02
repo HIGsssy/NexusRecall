@@ -4,19 +4,29 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "api": "tsx src/api/server.ts",
+    "harness:dev": "cd harness && npm run dev",
+    "harness:all": "concurrently \"npm run api\" \"npm run harness:dev\""
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
     "@types/node": "^25.5.0",
     "@types/pg": "^8.20.0",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.0",
     "typescript": "^6.0.2"
   },
   "dependencies": {
     "bullmq": "^5.72.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
     "ioredis": "^5.10.1",
     "pg": "^8.20.0"
   }

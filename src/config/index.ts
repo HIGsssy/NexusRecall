@@ -52,6 +52,9 @@ export interface Config {
 
   // Observability
   logLevel: LogLevel;
+
+  // API server
+  apiPort: number;
 }
 
 class ConfigValidationError extends Error {
@@ -181,6 +184,8 @@ function loadConfig(): Config {
 
   const logLevel = parseLogLevel(process.env['LOG_LEVEL']);
 
+  const apiPort = parsePositiveInt('NEXUS_RECALL_API_PORT', process.env['NEXUS_RECALL_API_PORT'], 3200);
+
   return {
     databaseUrl,
     databasePoolSize,
@@ -206,6 +211,7 @@ function loadConfig(): Config {
     contradictionSimilarityThreshold,
     exchangeRetentionDays,
     logLevel,
+    apiPort,
   };
 }
 
