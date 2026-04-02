@@ -43,6 +43,21 @@ services:
       redis:
         condition: service_healthy
 
+  nexus-recall-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://nexus:nexus@postgres:5432/nexusrecall
+      REDIS_URL: redis://redis:6379
+    command: ["npx", "tsx", "src/queue/worker.ts"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   harness:
     build:
       context: ./harness
