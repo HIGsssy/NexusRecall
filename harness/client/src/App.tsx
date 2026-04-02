@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import type { ChatMessage, IntentType, MemoryObject, TurnDiagnostics } from './types';
+import type { ChatMessage, IntentType, MemoryObject, TurnDiagnostics, RetrievalDebugInfo } from './types';
 import { patchSession } from './api';
 import { ErrorBanner } from './components/ErrorBanner';
 import { SessionControls } from './components/SessionControls';
@@ -18,6 +18,7 @@ export default function App() {
   const [intentType, setIntentType] = useState<IntentType>('conversational');
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [retrievedMemories, setRetrievedMemories] = useState<MemoryObject[]>([]);
+  const [retrievalDebug, setRetrievalDebug] = useState<RetrievalDebugInfo | undefined>(undefined);
   const [latestDiagnostics, setLatestDiagnostics] = useState<TurnDiagnostics | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -49,6 +50,7 @@ export default function App() {
     setSessionId(id);
     setHistory([]);
     setRetrievedMemories([]);
+    setRetrievalDebug(undefined);
     setLatestDiagnostics(null);
     setError(null);
   }
@@ -57,6 +59,7 @@ export default function App() {
     setSessionId(null);
     setHistory([]);
     setRetrievedMemories([]);
+    setRetrievalDebug(undefined);
     setLatestDiagnostics(null);
   }
 
@@ -73,7 +76,10 @@ export default function App() {
             sessionId={sessionId}
             history={history}
             onHistoryUpdate={setHistory}
-            onRetrieval={setRetrievedMemories}
+            onRetrieval={(memories: MemoryObject[], debugInfo?: RetrievalDebugInfo) => {
+              setRetrievedMemories(memories);
+              setRetrievalDebug(debugInfo);
+            }}
             onDiagnostics={setLatestDiagnostics}
             onError={handleError}
           />
@@ -100,6 +106,7 @@ export default function App() {
           <DiagnosticsPanel
             latestDiagnostics={latestDiagnostics}
             retrievedMemories={retrievedMemories}
+            retrievalDebug={retrievalDebug}
           />
           <PromptViewer
             assembledPrompt={latestDiagnostics?.assembledPrompt ?? null}

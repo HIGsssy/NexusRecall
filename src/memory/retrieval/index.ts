@@ -25,6 +25,10 @@ import type {
   GraduationStatus,
   EmbeddingVector,
   IntentType,
+  RetrievalDebugInfo,
+  RetrievalDebugCandidate,
+  RetrievalDroppedCandidate,
+  RetrievalScoredCandidate,
 } from '../models';
 
 // --- Internal Types ---
@@ -55,6 +59,16 @@ interface ScoredCandidate {
   row: CandidateRow;
   similarity: number;
   score: number;
+  recency?: number;
+}
+
+interface HardFilterResult {
+  passed: FilteredCandidate[];
+  dropped: RetrievalDroppedCandidate[];
+}
+
+function contentSummary(content: string): string {
+  return content.length > 120 ? content.slice(0, 120) + '...' : content;
 }
 
 // --- Helper Functions ---
@@ -162,33 +176,60 @@ function getRetrievalCacheTtlMs(intentType: IntentType): number {
 async function hardFilter(
   candidates: CandidateRow[],
   queryEmbedding: EmbeddingVector,
-  intentType: IntentType
-): Promise<FilteredCandidate[]> {
+  intentType: IntentType,
+  debug: boolean = false
+): Promise<HardFilterResult> {
+  const dropped: RetrievalDroppedCandidate[] = [];
+
   // Filter 1: Graduation gate + status check
-  let filtered = candidates.filter(
-    (c) => c.graduation_status === 'confirmed' && c.status === 'active'
-  );
+  const afterGraduation: CandidateRow[] = [];
+  for (const c of candidates) {
+    if (c.graduation_status !== 'confirmed' || c.status !== 'active') {
+      if (debug) dropped.push({ id: c.id, memory_type: c.memory_type, content_summary: contentSummary(c.content), reason: `graduation/status: graduation_status=${c.graduation_status}, status=${c.status}` });
+    } else {
+      afterGraduation.push(c);
+    }
+  }
 
   // Filter 2: Inhibition gate
-  filtered = filtered.filter((c) => !c.inhibited);
+  const afterInhibition: CandidateRow[] = [];
+  for (const c of afterGraduation) {
+    if (c.inhibited) {
+      if (debug) dropped.push({ id: c.id, memory_type: c.memory_type, content_summary: contentSummary(c.content), reason: 'inhibited' });
+    } else {
+      afterInhibition.push(c);
+    }
+  }
 
   // Filter 3: Similarity threshold
-  const withSimilarity: FilteredCandidate[] = filtered.map((row) => ({
+  const withSimilarity: FilteredCandidate[] = afterInhibition.map((row) => ({
     row,
     similarity: cosineSimilarity(queryEmbedding, parseVector(row.embedding)),
   }));
 
-  const afterThreshold = withSimilarity.filter(
-    (item) => item.similarity >= getSimilarityThreshold(item.row.memory_type)
-  );
+  const afterThreshold: FilteredCandidate[] = [];
+  for (const item of withSimilarity) {
+    const threshold = getSimilarityThreshold(item.row.memory_type);
+    if (item.similarity < threshold) {
+      if (debug) dropped.push({ id: item.row.id, memory_type: item.row.memory_type, content_summary: contentSummary(item.row.content), reason: `similarity ${item.similarity.toFixed(4)} < threshold ${threshold}` });
+    } else {
+      afterThreshold.push(item);
+    }
+  }
 
   // Filter 4: Cooldown gate (Redis-first, DB fallback)
   const now = Date.now();
   const afterCooldown: FilteredCandidate[] = [];
   for (const item of afterThreshold) {
     const redisOnCooldown = await isOnCooldown(item.row.id);
-    if (redisOnCooldown) continue;
-    if (item.row.cooldown_until && new Date(item.row.cooldown_until).getTime() > now) continue;
+    if (redisOnCooldown) {
+      if (debug) dropped.push({ id: item.row.id, memory_type: item.row.memory_type, content_summary: contentSummary(item.row.content), reason: 'cooldown (redis)' });
+      continue;
+    }
+    if (item.row.cooldown_until && new Date(item.row.cooldown_until).getTime() > now) {
+      if (debug) dropped.push({ id: item.row.id, memory_type: item.row.memory_type, content_summary: contentSummary(item.row.content), reason: `cooldown until ${item.row.cooldown_until}` });
+      continue;
+    }
     afterCooldown.push(item);
   }
 
@@ -196,11 +237,16 @@ async function hardFilter(
   const afterConfidence = afterCooldown;
 
   // Filter 6: Intent alignment — per-intent rules (Phase 2 S07)
-  const afterAlignment = intentType === 'task'
-    ? afterConfidence
-    : afterConfidence.filter((item) => item.row.memory_type !== 'commitment');
+  const afterAlignment: FilteredCandidate[] = [];
+  for (const item of afterConfidence) {
+    if (intentType !== 'task' && item.row.memory_type === 'commitment') {
+      if (debug) dropped.push({ id: item.row.id, memory_type: item.row.memory_type, content_summary: contentSummary(item.row.content), reason: `intent alignment: commitment excluded for intent=${intentType}` });
+    } else {
+      afterAlignment.push(item);
+    }
+  }
 
-  return afterAlignment;
+  return { passed: afterAlignment, dropped };
 }
 
 // --- Stage 5: Scoring ---
@@ -232,7 +278,7 @@ function score(candidates: FilteredCandidate[]): ScoredCandidate[] {
       importance * 0.1 +
       strength * 0.1;
 
-    return { row, similarity, score: compositeScore };
+    return { row, similarity, score: compositeScore, recency };
   });
 }
 
@@ -329,9 +375,11 @@ export async function execute(
   const candidates = rawRows.map(transformRow);
   logStage('stage_3_candidate_retrieval', Date.now() - start);
 
+  const debug = context.debug === true;
+
   // Stage 4: Hard Filtering
   start = Date.now();
-  const filtered = await hardFilter(candidates, queryEmbedding, intentType);
+  const { passed: filtered, dropped } = await hardFilter(candidates, queryEmbedding, intentType, debug);
   logStage('stage_4_hard_filter', Date.now() - start);
 
   // Stage 5: Scoring
@@ -346,10 +394,48 @@ export async function execute(
   const memories = mapToMemoryObjects(selected);
   logStage('stage_6_type_capped_selection', Date.now() - start);
 
+  // Build debug info if requested
+  let debugInfo: RetrievalDebugInfo | undefined;
+  if (debug) {
+    const dbCandidates: RetrievalDebugCandidate[] = candidates.map((c) => {
+      const sim = cosineSimilarity(queryEmbedding, parseVector(c.embedding));
+      return {
+        id: c.id,
+        memory_type: c.memory_type,
+        content_summary: contentSummary(c.content),
+        status: c.status,
+        graduation_status: c.graduation_status,
+        inhibited: c.inhibited,
+        similarity: parseFloat(sim.toFixed(4)),
+        cooldown_until: c.cooldown_until,
+      };
+    });
+
+    const scoredDebug: RetrievalScoredCandidate[] = sorted.map((s) => ({
+      id: s.row.id,
+      memory_type: s.row.memory_type,
+      content_summary: contentSummary(s.row.content),
+      similarity: parseFloat(s.similarity.toFixed(4)),
+      recency: parseFloat((s.recency ?? 0).toFixed(4)),
+      importance: s.row.importance,
+      strength: parseFloat(Math.max(0, Math.min(1, s.row.strength)).toFixed(4)),
+      final_score: parseFloat(s.score.toFixed(4)),
+    }));
+
+    debugInfo = {
+      candidates_from_db: candidates.length,
+      candidates: dbCandidates,
+      dropped,
+      scored: scoredDebug,
+      selected_ids: selected.map((s) => s.row.id),
+    };
+  }
+
   const result: RetrievalResult = {
     memories,
     retrieved_at: new Date().toISOString(),
     cache_hit: false,
+    debugInfo,
   };
 
   // Stage 7: Post-Selection Bookkeeping (non-blocking)

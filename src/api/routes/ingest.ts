@@ -1,7 +1,14 @@
 import { Router } from 'express';
 import { storeMemory } from '../../memory/service';
+import { getIngestionDebugLog } from '../../memory/ingestion';
 
 const router = Router();
+
+router.get('/ingest/debug', (_req, res) => {
+  const userId = _req.query.user_id as string | undefined;
+  const personaId = _req.query.persona_id as string | undefined;
+  res.json(getIngestionDebugLog(userId, personaId));
+});
 
 router.post('/ingest', async (req, res) => {
   try {

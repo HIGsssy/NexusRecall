@@ -93,12 +93,75 @@ export interface RetrievalContext {
   query_text: string;
   intent_type?: IntentType;
   session_id?: string;
+  debug?: boolean;
 }
 
 export interface RetrievalResult {
   memories: MemoryObject[];
   retrieved_at: string;
   cache_hit: boolean;
+  debugInfo?: RetrievalDebugInfo;
+}
+
+// --- Debug Types ---
+
+export interface RetrievalDebugCandidate {
+  id: string;
+  memory_type: string;
+  content_summary: string;
+  status: string;
+  graduation_status: string;
+  inhibited: boolean;
+  similarity: number;
+  cooldown_until: string | null;
+}
+
+export interface RetrievalDroppedCandidate {
+  id: string;
+  memory_type: string;
+  content_summary: string;
+  reason: string;
+}
+
+export interface RetrievalScoredCandidate {
+  id: string;
+  memory_type: string;
+  content_summary: string;
+  similarity: number;
+  recency: number;
+  importance: number;
+  strength: number;
+  final_score: number;
+}
+
+export interface RetrievalDebugInfo {
+  candidates_from_db: number;
+  candidates: RetrievalDebugCandidate[];
+  dropped: RetrievalDroppedCandidate[];
+  scored: RetrievalScoredCandidate[];
+  selected_ids: string[];
+}
+
+export interface IngestionDebugEvent {
+  timestamp: string;
+  userId: string;
+  personaId: string;
+  exchangeId: string;
+  role: 'user' | 'assistant';
+  contentSummary: string;
+  classification: {
+    memoryType: string | null;
+    importance: number;
+    confidence: string;
+    volatility: string;
+  };
+  discarded: boolean;
+  discardReason?: string;
+  inserted?: {
+    memoryId: string;
+    memoryType: string;
+    status: string;
+  };
 }
 
 export interface MemoryObject {

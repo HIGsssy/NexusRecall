@@ -5,7 +5,7 @@ const router = Router();
 
 router.post('/retrieve', async (req, res) => {
   try {
-    const { internal_user_id, persona_id, query_text, intent_type } = req.body;
+    const { internal_user_id, persona_id, query_text, intent_type, debug } = req.body;
 
     if (!internal_user_id || !persona_id || !query_text) {
       res.status(400).json({
@@ -19,6 +19,7 @@ router.post('/retrieve', async (req, res) => {
       persona_id,
       query_text,
       intent_type,
+      debug: debug === true,
     });
 
     res.json(result);

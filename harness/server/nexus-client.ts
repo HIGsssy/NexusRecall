@@ -4,6 +4,7 @@ import type {
   RetrievalResult,
   IngestRequest,
   StoreMemoryResult,
+  IngestionDebugEvent,
 } from './nexus-types';
 import { NexusClientError } from './nexus-types';
 
@@ -51,5 +52,22 @@ export async function checkHealth(): Promise<boolean> {
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+export async function fetchIngestionDebugLog(
+  userId?: string,
+  personaId?: string
+): Promise<IngestionDebugEvent[]> {
+  const params = new URLSearchParams();
+  if (userId) params.set('user_id', userId);
+  if (personaId) params.set('persona_id', personaId);
+  const qs = params.toString();
+  try {
+    const res = await fetch(`${baseUrl}/api/ingest/debug${qs ? `?${qs}` : ''}`);
+    if (!res.ok) return [];
+    return res.json() as Promise<IngestionDebugEvent[]>;
+  } catch {
+    return [];
   }
 }

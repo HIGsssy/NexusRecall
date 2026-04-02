@@ -1,9 +1,9 @@
-import type { MemoryObject, TurnDiagnostics, SessionState, IntentType } from './types';
+import type { MemoryObject, TurnDiagnostics, SessionState, IntentType, RetrievalDebugInfo } from './types';
 
 /* ── SSE chat stream ─────────────────────────────────────── */
 
 export interface SSECallbacks {
-  onRetrieval: (data: { memories: MemoryObject[]; cache_hit: boolean }) => void;
+  onRetrieval: (data: { memories: MemoryObject[]; cache_hit: boolean; debugInfo?: RetrievalDebugInfo }) => void;
   onDelta: (data: { content: string }) => void;
   onDone: (data: {
     fullResponse: string;

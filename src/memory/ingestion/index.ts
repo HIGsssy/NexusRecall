@@ -26,7 +26,31 @@ import type {
   PruneScope,
   UpdateMemoryInput,
   UpdateMemoryResult,
+  IngestionDebugEvent,
 } from '../models';
+
+// --- Ingestion Debug Ring Buffer ---
+
+const INGESTION_DEBUG_MAX = 50;
+const ingestionDebugBuffer: IngestionDebugEvent[] = [];
+
+function pushIngestionDebug(event: IngestionDebugEvent): void {
+  ingestionDebugBuffer.push(event);
+  if (ingestionDebugBuffer.length > INGESTION_DEBUG_MAX) {
+    ingestionDebugBuffer.shift();
+  }
+}
+
+export function getIngestionDebugLog(userId?: string, personaId?: string): IngestionDebugEvent[] {
+  if (!userId) return [...ingestionDebugBuffer];
+  return ingestionDebugBuffer.filter(
+    (e) => e.userId === userId && (!personaId || e.personaId === personaId)
+  );
+}
+
+export function getRecentIngestionDebug(): IngestionDebugEvent[] {
+  return [...ingestionDebugBuffer];
+}
 
 // --- Job Data Shapes ---
 
@@ -352,10 +376,43 @@ async function handleClassifyTurn(data: ClassifyTurnData): Promise<void> {
   }
 
   const result = classify(exchange.role, exchange.content);
+  const summary = exchange.content.length > 120 ? exchange.content.slice(0, 120) + '...' : exchange.content;
 
   if (result.memoryType === null) {
+    pushIngestionDebug({
+      timestamp: new Date().toISOString(),
+      userId: data.userId,
+      personaId: data.personaId,
+      exchangeId: exchange.id,
+      role: exchange.role,
+      contentSummary: summary,
+      classification: {
+        memoryType: null,
+        importance: result.importance,
+        confidence: result.confidence,
+        volatility: result.volatility,
+      },
+      discarded: true,
+      discardReason: 'classification returned null memoryType',
+    });
     return;
   }
+
+  pushIngestionDebug({
+    timestamp: new Date().toISOString(),
+    userId: data.userId,
+    personaId: data.personaId,
+    exchangeId: exchange.id,
+    role: exchange.role,
+    contentSummary: summary,
+    classification: {
+      memoryType: result.memoryType,
+      importance: result.importance,
+      confidence: result.confidence,
+      volatility: result.volatility,
+    },
+    discarded: false,
+  });
 
   await ingestionQueue.add('embed-and-promote', {
     exchangeId: exchange.id,
@@ -400,7 +457,7 @@ async function handleEmbedAndPromote(data: EmbedAndPromoteData): Promise<void> {
     }
   }
 
-  await insertConfirmedMemory(
+  const memoryId = await insertConfirmedMemory(
     data.userId,
     data.personaId,
     data.memoryType,
@@ -411,6 +468,18 @@ async function handleEmbedAndPromote(data: EmbedAndPromoteData): Promise<void> {
     data.volatility,
     lineageParentId
   );
+
+  // Update the most recent matching debug event with insert result
+  for (let i = ingestionDebugBuffer.length - 1; i >= 0; i--) {
+    if (ingestionDebugBuffer[i].exchangeId === data.exchangeId && !ingestionDebugBuffer[i].discarded) {
+      ingestionDebugBuffer[i].inserted = {
+        memoryId,
+        memoryType: data.memoryType,
+        status: 'confirmed',
+      };
+      break;
+    }
+  }
 
   await invalidateRetrievalCache(data.userId, data.personaId);
 }

@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { getSession } from '../session/store';
-import { retrieveMemories, ingestExchange } from '../nexus-client';
+import { retrieveMemories, ingestExchange, fetchIngestionDebugLog } from '../nexus-client';
 import { assemblePrompt } from '../prompt/assembler';
 import { createLLMProvider } from '../llm/factory';
 import { harnessConfig } from '../config';
@@ -36,17 +36,19 @@ router.post('/chat', async (req: Request, res: Response) => {
   const startTime = Date.now();
 
   try {
-    // 1. Retrieve memories
+    // 1. Retrieve memories (with debug)
     const retrieval = await retrieveMemories({
       internal_user_id: session.internalUserId,
       persona_id: session.personaId,
       query_text: message,
       intent_type: session.intentType,
+      debug: true,
     });
 
     sendEvent(res, 'retrieval', {
       memories: retrieval.memories,
       cache_hit: retrieval.cache_hit,
+      debugInfo: retrieval.debugInfo,
     });
 
     // 2. Assemble prompt
@@ -56,6 +58,16 @@ router.post('/chat', async (req: Request, res: Response) => {
       history: session.history,
       userMessage: message,
     });
+
+    // Extract memory section from assembled prompt for debug
+    const systemMsg = assembled.find(m => m.role === 'system');
+    let memorySectionSentToLLM: string | undefined;
+    if (systemMsg) {
+      const memIdx = systemMsg.content.indexOf('## Relevant Memories');
+      if (memIdx !== -1) {
+        memorySectionSentToLLM = systemMsg.content.slice(memIdx);
+      }
+    }
 
     // 3. Stream LLM response
     let fullResponse = '';
@@ -87,6 +99,12 @@ router.post('/chat', async (req: Request, res: Response) => {
       }).catch((err) => ({ error: String(err) })),
     ]);
 
+    // 5b. Fetch ingestion debug log
+    const ingestionDebug = await fetchIngestionDebugLog(
+      session.internalUserId,
+      session.personaId
+    );
+
     // 6. Record diagnostics
     const diag: TurnDiagnostics = {
       turnIndex: session.diagnostics.length,
@@ -94,6 +112,9 @@ router.post('/chat', async (req: Request, res: Response) => {
       assembledPrompt: assembled,
       fullResponse,
       durationMs: Date.now() - startTime,
+      retrievalDebug: retrieval.debugInfo,
+      ingestionDebug,
+      memorySectionSentToLLM,
     };
     session.diagnostics.push(diag);
 

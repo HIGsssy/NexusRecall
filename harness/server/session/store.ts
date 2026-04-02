@@ -1,5 +1,5 @@
 import type { ChatMessage } from '../llm/types';
-import type { IntentType, MemoryObject } from '../nexus-types';
+import type { IntentType, MemoryObject, RetrievalDebugInfo, IngestionDebugEvent } from '../nexus-types';
 
 export interface TurnDiagnostics {
   turnIndex: number;
@@ -7,6 +7,9 @@ export interface TurnDiagnostics {
   assembledPrompt: ChatMessage[];
   fullResponse: string;
   durationMs: number;
+  retrievalDebug?: RetrievalDebugInfo;
+  ingestionDebug?: IngestionDebugEvent[];
+  memorySectionSentToLLM?: string;
 }
 
 export interface SessionState {

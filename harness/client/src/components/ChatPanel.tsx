@@ -1,13 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
 import type { ChatMessage } from '../types';
 import { sendChat, type SSECallbacks } from '../api';
-import type { MemoryObject, TurnDiagnostics } from '../types';
+import type { MemoryObject, TurnDiagnostics, RetrievalDebugInfo } from '../types';
 
 interface Props {
   sessionId: string | null;
   history: ChatMessage[];
   onHistoryUpdate: (history: ChatMessage[]) => void;
-  onRetrieval: (memories: MemoryObject[]) => void;
+  onRetrieval: (memories: MemoryObject[], debugInfo?: RetrievalDebugInfo) => void;
   onDiagnostics: (diag: TurnDiagnostics) => void;
   onError: (msg: string) => void;
 }
@@ -46,7 +46,7 @@ export function ChatPanel({
     let accumulated = '';
 
     const callbacks: SSECallbacks = {
-      onRetrieval: (data) => onRetrieval(data.memories),
+      onRetrieval: (data) => onRetrieval(data.memories, data.debugInfo),
       onDelta: (data) => {
         accumulated += data.content;
         setStreamingContent(accumulated);
