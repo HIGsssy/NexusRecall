@@ -89,3 +89,72 @@
 * No schema migrations
 * No new config variables
 * No new modules or dependencies
+
+## Phase 2 — S05 (Classification Upgrade)
+
+**Status:** COMPLETE
+
+**Completed:**
+
+* [x] `MemoryType` extended with `'commitment'` type
+* [x] `MemoryStatus` extended with `'superseded'` and `'corrected'` states
+* [x] `GraduationStatus` type added: `'observation' | 'candidate' | 'confirmed'`
+* [x] `IntentType` type added: `'task' | 'conversational' | 'emotional'`
+* [x] `Memory` interface updated with `lineage_parent_id` and `inhibited` fields
+* [x] Classification logic upgraded in `classify()` — role-based routing with length thresholds
+
+**Files changed:**
+
+* `src/memory/models/index.ts` — new types and interface fields
+* `src/memory/ingestion/index.ts` — classification routing
+
+## Phase 2 — S06 (Contradiction Detection + Lineage)
+
+**Status:** COMPLETE
+
+**Completed:**
+
+* [x] `CONTRADICTION_ELIGIBLE_TYPES` constant: only `semantic` and `self` are eligible
+* [x] `cosineSimilarity()` and `parseVector()` helpers for vector comparison
+* [x] `findContradictionCandidates()` query — fetches active confirmed memories by type with embeddings
+* [x] `markSuperseded()` query — sets `status = 'superseded'` on contradicted memories
+* [x] `insertConfirmedMemory()` accepts optional `lineageParentId` for correction lineage tracking
+* [x] Contradiction detection integrated into embed-and-promote flow
+
+**Files changed:**
+
+* `src/memory/ingestion/index.ts` — contradiction detection logic, eligible types, vector math
+* `src/db/queries/memories.ts` — `findContradictionCandidates`, `markSuperseded`, lineage parameter
+
+**Boundary compliance:**
+
+* No changes to `memory/service`, `memory/cache`, `memory/embedding`, or `memory/retrieval`
+* No schema migrations
+
+## Phase 2 — S07 (Commitment Detection)
+
+**Status:** COMPLETE — AUDITED PASS
+
+**Completed:**
+
+* [x] `COMMITMENT_PATTERNS` — 19 explicit acceptance phrases (e.g. "i will ", "i promise", "i commit to")
+* [x] `COMMITMENT_EXCLUSION_PATTERNS` — 14 hedged/ambiguous phrases filtered out (e.g. "i'll try", "maybe")
+* [x] `isCommitment()` helper — pattern matching with exclusion and question guard
+* [x] Commitment branch in `classify()` — returns `memoryType: 'commitment'`, `importance: 0.8`, `confidence: 'explicit'`, `volatility: 'factual'`
+* [x] Commitment check placed before self-referential check (commitment takes precedence)
+* [x] Commitments excluded from contradiction detection (`CONTRADICTION_ELIGIBLE_TYPES`)
+* [x] Retrieval Filter 6 upgraded — `intentType` parameter added to `hardFilter()`
+* [x] Per-intent alignment rules: `task` passes all types; `conversational`/`emotional` exclude commitment
+* [x] Type cap for commitment: max 1 per retrieval
+
+**Files changed:**
+
+* `src/memory/ingestion/index.ts` — commitment patterns, exclusion patterns, `isCommitment()`, classify branch
+* `src/memory/retrieval/index.ts` — Filter 6 intent alignment with `intentType` parameter
+
+**Boundary compliance:**
+
+* `volatility` correctly set to `'factual'` (not unauthorized `'behavioral'`)
+* `VolatilityLevel` type unchanged: `'factual' | 'subjective'`
+* No schema migrations
+* No new config variables (except `SIMILARITY_THRESHOLD_COMMITMENT` added via config)
