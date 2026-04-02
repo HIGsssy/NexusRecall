@@ -161,7 +161,8 @@ function getRetrievalCacheTtlMs(intentType: IntentType): number {
 
 async function hardFilter(
   candidates: CandidateRow[],
-  queryEmbedding: EmbeddingVector
+  queryEmbedding: EmbeddingVector,
+  intentType: IntentType
 ): Promise<FilteredCandidate[]> {
   // Filter 1: Graduation gate + status check
   let filtered = candidates.filter(
@@ -194,10 +195,10 @@ async function hardFilter(
   // Filter 5: Confidence gate — pass all records (Phase 1)
   const afterConfidence = afterCooldown;
 
-  // Filter 6: Intent alignment — exclude commitment type (Phase 1)
-  const afterAlignment = afterConfidence.filter(
-    (item) => item.row.memory_type !== 'commitment'
-  );
+  // Filter 6: Intent alignment — per-intent rules (Phase 2 S07)
+  const afterAlignment = intentType === 'task'
+    ? afterConfidence
+    : afterConfidence.filter((item) => item.row.memory_type !== 'commitment');
 
   return afterAlignment;
 }
@@ -330,7 +331,7 @@ export async function execute(
 
   // Stage 4: Hard Filtering
   start = Date.now();
-  const filtered = await hardFilter(candidates, queryEmbedding);
+  const filtered = await hardFilter(candidates, queryEmbedding, intentType);
   logStage('stage_4_hard_filter', Date.now() - start);
 
   // Stage 5: Scoring

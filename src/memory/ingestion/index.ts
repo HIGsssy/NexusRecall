@@ -97,6 +97,45 @@ const INSTRUCTIONAL_PATTERNS: readonly string[] = [
   'remember to', 'be sure to', 'don\'t forget', 'important to',
 ];
 
+const COMMITMENT_PATTERNS: readonly string[] = [
+  'i will ',
+  'i\'ll ',
+  'i won\'t ',
+  'i will not ',
+  'i promise',
+  'i\'m going to ',
+  'i am going to ',
+  'i shall ',
+  'i commit to',
+  'i\'ll make sure',
+  'i will make sure',
+  'i\'ll ensure',
+  'i will ensure',
+  'i\'ll keep',
+  'i will keep',
+  'i\'ll remember',
+  'i will remember',
+  'i won\'t forget',
+  'i will not forget',
+];
+
+const COMMITMENT_EXCLUSION_PATTERNS: readonly string[] = [
+  'i\'ll try',
+  'i will try',
+  'i can ',
+  'i could ',
+  'i might ',
+  'i may ',
+  'maybe',
+  'perhaps',
+  'do you want me to',
+  'would you like me to',
+  'shall i ',
+  'should i ',
+  'if you want',
+  'if you\'d like',
+];
+
 function isSelfReferential(contentLower: string): boolean {
   return SELF_REFERENTIAL_PATTERNS.some(p => contentLower.includes(p));
 }
@@ -125,6 +164,12 @@ function appearsInstructional(contentLower: string): boolean {
   return INSTRUCTIONAL_PATTERNS.some(p => contentLower.includes(p));
 }
 
+function isCommitment(contentLower: string, content: string): boolean {
+  if (isQuestion(content)) return false;
+  if (COMMITMENT_EXCLUSION_PATTERNS.some(p => contentLower.includes(p))) return false;
+  return COMMITMENT_PATTERNS.some(p => contentLower.includes(p));
+}
+
 function classify(role: 'user' | 'assistant', content: string): ClassificationResult {
   const trimmed = content.trim();
   const lower = trimmed.toLowerCase();
@@ -132,6 +177,10 @@ function classify(role: 'user' | 'assistant', content: string): ClassificationRe
   if (role === 'assistant') {
     if (trimmed.length < config.classifierMinSemanticLength) {
       return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
+    }
+
+    if (isCommitment(lower, trimmed)) {
+      return { memoryType: 'commitment', importance: 0.8, confidence: 'explicit', volatility: 'factual' };
     }
 
     if (isSelfReferential(lower)) {
