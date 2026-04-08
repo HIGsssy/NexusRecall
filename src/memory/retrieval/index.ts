@@ -6,6 +6,7 @@
 import { createHash } from 'crypto';
 import { config } from '../../config';
 import { embed } from '../embedding';
+import { canonicalizeDialect } from '../normalization';
 import { fetchCandidates } from '../../db/queries/memories';
 import {
   getRetrievalCache,
@@ -344,8 +345,9 @@ export async function execute(
 
   // Stage 1: Cache Check
   let start = Date.now();
+  const canonicalQuery = canonicalizeDialect(context.query_text);
   const queryHash = createHash('sha256')
-    .update(context.query_text)
+    .update(canonicalQuery)
     .digest('hex');
   const cacheKey: RetrievalCacheKey = {
     userId: context.internal_user_id,

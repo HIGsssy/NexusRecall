@@ -6,6 +6,7 @@
 import { createHash } from 'crypto';
 import { config } from '../../config';
 import { getEmbedding, setEmbedding } from '../cache';
+import { canonicalizeDialect } from '../normalization';
 import type { EmbeddingVector } from '../models';
 
 // --- Typed Error ---
@@ -145,22 +146,25 @@ export async function embed(text: string, _sessionId?: string): Promise<Embeddin
     throw new EmbeddingError('Cannot embed empty text');
   }
 
-  // 1. Normalize text for hashing only
-  const normalizedText = text.trim().toLowerCase();
+  // 1. Canonicalize dialect spelling (British/Canadian → American)
+  const canonicalText = canonicalizeDialect(text);
 
-  // 2. Compute hash
+  // 2. Normalize for hashing only
+  const normalizedText = canonicalText.trim().toLowerCase();
+
+  // 3. Compute hash
   const textHash = createHash('sha256').update(normalizedText).digest('hex');
 
-  // 3. Check embedding cache
+  // 4. Check embedding cache
   const cached = await getEmbedding(textHash);
   if (cached !== null) {
     return cached;
   }
 
-  // 4. Call provider on cache miss (original text, not normalized)
-  const vector = await adapter.generate(text);
+  // 5. Call provider on cache miss (canonicalized text)
+  const vector = await adapter.generate(canonicalText);
 
-  // 5. Write to embedding cache
+  // 6. Write to embedding cache
   const ttlMs = config.embeddingCacheTtlSeconds * 1000;
   await setEmbedding(textHash, vector, ttlMs);
 
