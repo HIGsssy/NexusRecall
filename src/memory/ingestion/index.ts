@@ -85,11 +85,22 @@ interface ClassificationResult {
   confidence: ConfidenceLevel;
   volatility: VolatilityLevel;
   distilledContent?: string;
+  reason?: string;
 }
 
 interface SemanticFactDetection {
   distilledText: string;
   importance: number;
+}
+
+interface AssistantSignalDetection {
+  signalType: string;
+  distilledText: string;
+  memoryType: MemoryType;
+  importance: number;
+  confidence: ConfidenceLevel;
+  volatility: VolatilityLevel;
+  reason: string;
 }
 
 const SELF_REFERENTIAL_PATTERNS: readonly string[] = [
@@ -192,6 +203,234 @@ const USER_SEMANTIC_FACT_RULES: readonly { pattern: RegExp; distill: (m: RegExpM
   { pattern: /^i(?:'m| am) an?\\b(.+)/i,     distill: (m) => `User is ${m[0].match(/\ban\b/i) ? 'an' : 'a'}${m[1]}` },
 ];
 
+// --- Assistant Memory Gate: Pattern Sets ---
+// Evaluation order in detectAssistantMemorySignal():
+//   1. ASSISTANT_USER_FACT_RULES (highest priority)
+//   2. ASSISTANT_CONFIRMATION_RULES
+//   3. ASSISTANT_CORRECTION_RULES
+//   4. ASSISTANT_SUMMARY_RULES (lowest priority)
+// Within each family: most specific → most general. First valid match wins.
+
+const ASSISTANT_FILLER_PATTERNS: readonly string[] = [
+  'let me think', 'let me walk through', 'let me work through',
+  'interesting question', 'good question', 'great question',
+  'that makes sense', 'that\'s a good point', 'that\'s a great point',
+  'here\'s how i\'d approach', 'here\'s what i\'d suggest',
+  'let me consider', 'i think we\'re in', 'i think we\'re on',
+  'let me break this down', 'let\'s look at this',
+  'here\'s my take', 'here\'s my thinking',
+];
+
+const ASSISTANT_NARRATIVE_INDICATORS: readonly string[] = [
+  'smiled', 'nodded', 'sighed', 'whispered', 'murmured',
+  'gazed', 'leaned', 'glanced', 'shrugged', 'paused',
+  'gently', 'softly', 'quietly', 'slowly', 'carefully',
+  'for a moment', 'looked away', 'eyes met',
+  'neon', 'moonlight', 'caught in her', 'caught in his',
+  'took a breath', 'let out a', 'turned away',
+  'stepped closer', 'stepped back',
+];
+
+// Rules ordered most specific → most general.
+const ASSISTANT_USER_FACT_RULES: readonly { pattern: RegExp; distill: (m: RegExpMatchArray) => string }[] = [
+  { pattern: /\byour favou?rite (.+?) is (.+?)(?:[.,!]|$)/i,
+    distill: (m) => `User's favorite ${m[1]} is ${m[2]}` },
+  { pattern: /\byou(?:'re| are) allergic to (.+?)(?:[.,!]|$)/i,
+    distill: (m) => `User is allergic to ${m[1]}` },
+  { pattern: /\byou don't (?:like|enjoy|want) (.+?)(?:[.,!]|$)/i,
+    distill: (m) => `User doesn't ${m[0].match(/like/i) ? 'like' : m[0].match(/enjoy/i) ? 'enjoy' : 'want'} ${m[1]}` },
+  { pattern: /\byou work (at|for|as) (.+?)(?:[.,!]|$)/i,
+    distill: (m) => `User works ${m[1]} ${m[2]}` },
+  { pattern: /\byou live in (.+?)(?:[.,!]|$)/i,
+    distill: (m) => `User lives in ${m[1]}` },
+  { pattern: /\byou(?:'re| are) from (.+?)(?:[.,!]|$)/i,
+    distill: (m) => `User is from ${m[1]}` },
+  { pattern: /\byou(?:'re| are) (an? .+?)(?:[.,!]|$)/i,
+    distill: (m) => `User is ${m[1]}` },
+  { pattern: /\byou said (?:that )?(?:you )?(.+?)(?:[.!]|$)/i,
+    distill: (m) => `User said ${m[1]}` },
+  { pattern: /\byou mentioned (?:that )?(.+?)(?:[.!]|$)/i,
+    distill: (m) => `User mentioned ${m[1]}` },
+  { pattern: /\byou prefer (.+?)(?:[.,!]|$)/i,
+    distill: (m) => `User prefers ${m[1]}` },
+];
+
+// Narrow confirmation rules: require confirmation token + substantive trailing clause.
+// Bare confirmations ("That's correct.", "Right.") do NOT match.
+const CONFIRMATION_TOKEN = '(?:yes|yeah|correct|right|exactly|that\'s (?:right|correct))';
+
+const ASSISTANT_CONFIRMATION_RULES: readonly { pattern: RegExp; distill: (m: RegExpMatchArray) => string }[] = [
+  { pattern: new RegExp(`\\b${CONFIRMATION_TOKEN}\\s*[—–,\\-]\\s*the (?:issue|problem) (?:was|is) (.+?)(?:[.!]|$)`, 'i'),
+    distill: (m) => `The ${m[0].match(/issue/i) ? 'issue' : 'problem'} ${m[0].match(/\bwas\b/i) ? 'was' : 'is'} ${m[1]}` },
+  { pattern: new RegExp(`\\b${CONFIRMATION_TOKEN}\\s*[—–,\\-]\\s*the (?:cause|root cause) (?:was|is) (.+?)(?:[.!]|$)`, 'i'),
+    distill: (m) => `The ${m[0].match(/root cause/i) ? 'root cause' : 'cause'} ${m[0].match(/\bwas\b/i) ? 'was' : 'is'} ${m[1]}` },
+  { pattern: new RegExp(`\\b${CONFIRMATION_TOKEN}\\s*[—–,\\-]\\s*(.{10,}?)(?:[.!]|$)`, 'i'),
+    distill: (m) => m[1].trim() },
+];
+
+const ASSISTANT_CORRECTION_RULES: readonly { pattern: RegExp; distill: (m: RegExpMatchArray) => string }[] = [
+  { pattern: /\bthe (?:cause|root cause) (?:was|is) (.+?)(?:[.!]|$)/i,
+    distill: (m) => `The ${m[0].match(/root cause/i) ? 'root cause' : 'cause'} ${m[0].match(/\bwas\b/i) ? 'was' : 'is'} ${m[1]}` },
+  { pattern: /\bthe fix (?:was|is) (.+?)(?:[.!]|$)/i,
+    distill: (m) => `The fix ${m[0].match(/\bwas\b/i) ? 'was' : 'is'} ${m[1]}` },
+  { pattern: /\byou were right (?:that )?(.+?)(?:[.!]|$)/i,
+    distill: (m) => `User was right: ${m[1]}` },
+  { pattern: /\bit turned out (?:that )?(.+?)(?:[.!]|$)/i,
+    distill: (m) => m[1].trim() },
+  { pattern: /\bthe (?:issue|problem) (?:was|is) (.+?)(?:[.!]|$)/i,
+    distill: (m) => `The ${m[0].match(/issue/i) ? 'issue' : 'problem'} ${m[0].match(/\bwas\b/i) ? 'was' : 'is'} ${m[1]}` },
+];
+
+const ASSISTANT_SUMMARY_RULES: readonly { pattern: RegExp; distill: (m: RegExpMatchArray) => string }[] = [
+  { pattern: /\bthe (?:main|short) (?:takeaway|point) is[,:]?\s*(.+?)(?:[.!]|$)/i,
+    distill: (m) => m[1].trim() },
+  { pattern: /\bthe key point is[,:]?\s*(.+?)(?:[.!]|$)/i,
+    distill: (m) => m[1].trim() },
+  { pattern: /\bto summarize[,:]?\s*(.+?)(?:[.!]|$)/i,
+    distill: (m) => m[1].trim() },
+  { pattern: /\bin summary[,:]?\s*(.+?)(?:[.!]|$)/i,
+    distill: (m) => m[1].trim() },
+  { pattern: /\bbottom line[,:]?\s*(.+?)(?:[.!]|$)/i,
+    distill: (m) => m[1].trim() },
+];
+
+// --- Assistant Memory Gate: Helper Functions ---
+
+function isValidDistillation(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < 8) return false;
+  if (trimmed.endsWith('...')) return false;
+  if (/^[,;:\-—–.!?]/.test(trimmed)) return false;
+  return true;
+}
+
+function stripConversationalPadding(content: string): string {
+  let result = content;
+  const padRe = /^(absolutely|sure|got it|of course|certainly|no problem|okay|ok|right|yes|yeah)\s*[—–\-!.,]\s*/i;
+  while (padRe.test(result)) {
+    result = result.replace(padRe, '');
+  }
+  return result || content; // fallback to original if somehow emptied
+}
+
+function isAssistantFiller(contentLower: string): string | null {
+  for (const p of ASSISTANT_FILLER_PATTERNS) {
+    if (contentLower.includes(p)) return p;
+  }
+  return null;
+}
+
+function hasNarrativeFluff(contentLower: string): boolean {
+  let count = 0;
+  for (const indicator of ASSISTANT_NARRATIVE_INDICATORS) {
+    if (contentLower.includes(indicator)) {
+      count++;
+      if (count >= 3) return true;
+    }
+  }
+  return false;
+}
+
+function detectAssistantMemorySignal(content: string): AssistantSignalDetection | null {
+  // Family evaluation order: user-fact > confirmation > correction > summary
+  // Within each family: top-to-bottom, first valid distillation wins
+
+  type RuleFamily = {
+    rules: readonly { pattern: RegExp; distill: (m: RegExpMatchArray) => string }[];
+    signalType: string;
+    memoryType: MemoryType;
+    importance: number;
+    confidence: ConfidenceLevel;
+    volatility: VolatilityLevel;
+    reason: string;
+  };
+
+  const families: RuleFamily[] = [
+    { rules: ASSISTANT_USER_FACT_RULES, signalType: 'user_fact_restatement',
+      memoryType: 'semantic', importance: 0.7, confidence: 'explicit', volatility: 'factual',
+      reason: 'stored_assistant_semantic_distilled' },
+    { rules: ASSISTANT_CONFIRMATION_RULES, signalType: 'confirmation',
+      memoryType: 'semantic', importance: 0.65, confidence: 'inferred', volatility: 'factual',
+      reason: 'stored_assistant_confirmation_distilled' },
+    { rules: ASSISTANT_CORRECTION_RULES, signalType: 'correction',
+      memoryType: 'semantic', importance: 0.65, confidence: 'inferred', volatility: 'factual',
+      reason: 'stored_assistant_conclusion_distilled' },
+    { rules: ASSISTANT_SUMMARY_RULES, signalType: 'summary',
+      memoryType: 'semantic', importance: 0.65, confidence: 'inferred', volatility: 'factual',
+      reason: 'stored_assistant_summary_distilled' },
+  ];
+
+  for (const family of families) {
+    for (const rule of family.rules) {
+      const match = content.match(rule.pattern);
+      if (!match) continue;
+
+      const distilled = rule.distill(match);
+      if (!isValidDistillation(distilled)) continue;
+
+      return {
+        signalType: family.signalType,
+        distilledText: distilled,
+        memoryType: family.memoryType,
+        importance: family.importance,
+        confidence: family.confidence,
+        volatility: family.volatility,
+        reason: family.reason,
+      };
+    }
+  }
+
+  return null;
+}
+
+const COMMITMENT_EMBEDDED_FACT_RE = /(?:remember|keep in mind|noted|got it) that (your .+|you .+)/i;
+
+function distillCommitment(content: string): string {
+  const stripped = stripConversationalPadding(content);
+
+  // Try embedded user-fact extraction
+  const factMatch = stripped.match(COMMITMENT_EMBEDDED_FACT_RE);
+  if (factMatch) {
+    let fact = factMatch[1].trim().replace(/[.!,]+$/, '');
+    // Transform user references to third-person
+    fact = fact
+      .replace(/\byour favou?rite\b/gi, 'User\'s favorite')
+      .replace(/\byour\b/gi, 'User\'s')
+      .replace(/\byou(?:'re| are)\b/gi, 'User is')
+      .replace(/\byou live\b/gi, 'User lives')
+      .replace(/\byou work\b/gi, 'User works')
+      .replace(/\byou prefer\b/gi, 'User prefers')
+      .replace(/\byou(?:'ve| have)\b/gi, 'User has')
+      .replace(/\byou\b/gi, 'user');
+    if (isValidDistillation(fact)) return fact;
+    // Fall through to safe third-person transformation
+  }
+
+  // Safe fallback: third-person transformation of full commitment text
+  let result = stripped
+    .replace(/\bI'll\b/g, 'Assistant will')
+    .replace(/\bI will\b/g, 'Assistant will')
+    .replace(/\bI'm going to\b/g, 'Assistant is going to')
+    .replace(/\bI am going to\b/g, 'Assistant is going to')
+    .replace(/\bI shall\b/g, 'Assistant will')
+    .replace(/\bI won't\b/g, 'Assistant will not')
+    .replace(/\bI will not\b/g, 'Assistant will not')
+    .replace(/\bI commit to\b/g, 'Assistant commits to')
+    .replace(/\bI promise\b/g, 'Assistant promises')
+    .replace(/\bi'll\b/g, 'Assistant will')
+    .replace(/\bi will\b/g, 'Assistant will')
+    .replace(/\bi'm going to\b/g, 'Assistant is going to')
+    .replace(/\bi am going to\b/g, 'Assistant is going to')
+    .replace(/\bi shall\b/g, 'Assistant will')
+    .replace(/\bi won't\b/g, 'Assistant will not')
+    .replace(/\bi will not\b/g, 'Assistant will not')
+    .replace(/\bi commit to\b/g, 'Assistant commits to')
+    .replace(/\bi promise\b/g, 'Assistant promises')
+    .replace(/\byou\b/gi, 'user');
+
+  return result || content; // last-resort fallback to original
+}
+
 function isSelfReferential(contentLower: string): boolean {
   return SELF_REFERENTIAL_PATTERNS.some(p => contentLower.includes(p));
 }
@@ -256,25 +495,61 @@ function classify(role: 'user' | 'assistant', content: string): ClassificationRe
 
   if (role === 'assistant') {
     if (trimmed.length < config.classifierMinSemanticLength) {
-      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
+      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective',
+               reason: 'rejected_assistant_too_short' };
     }
 
     if (isCommitment(lower, trimmed)) {
-      return { memoryType: 'commitment', importance: 0.8, confidence: 'explicit', volatility: 'factual' };
+      return { memoryType: 'commitment', importance: 0.8, confidence: 'explicit', volatility: 'factual',
+               distilledContent: distillCommitment(trimmed), reason: 'stored_assistant_commitment' };
     }
 
     if (isSelfReferential(lower)) {
-      return { memoryType: 'self', importance: 0.6, confidence: 'inferred', volatility: 'subjective' };
+      return { memoryType: 'self', importance: 0.6, confidence: 'inferred', volatility: 'subjective',
+               reason: 'stored_assistant_self' };
     }
 
-    if (isQuestion(trimmed) || isShortGreeting(lower) || isMetaConversational(lower)) {
-      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
+    if (isQuestion(trimmed)) {
+      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective',
+               reason: 'rejected_assistant_question' };
+    }
+    if (isShortGreeting(lower)) {
+      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective',
+               reason: 'rejected_assistant_greeting' };
+    }
+    if (isMetaConversational(lower)) {
+      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective',
+               reason: 'rejected_assistant_meta' };
     }
 
-    const volatility: VolatilityLevel = containsHedging(lower) ? 'subjective' : 'factual';
-    const importance = appearsInstructional(lower) ? 0.7 : 0.5;
+    // Assistant memory signal detection (replaces semantic catch-all)
+    const signal = detectAssistantMemorySignal(trimmed);
+    if (signal) {
+      return {
+        memoryType: signal.memoryType,
+        importance: signal.importance,
+        confidence: signal.confidence,
+        volatility: signal.volatility,
+        distilledContent: signal.distilledText,
+        reason: signal.reason,
+      };
+    }
 
-    return { memoryType: 'semantic', importance, confidence: 'inferred', volatility };
+    // No strong signal — check for specific rejection categories
+    const fillerMatch = isAssistantFiller(lower);
+    if (fillerMatch) {
+      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective',
+               reason: 'rejected_assistant_filler' };
+    }
+
+    if (hasNarrativeFluff(lower)) {
+      return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective',
+               reason: 'rejected_assistant_narrative_fluff' };
+    }
+
+    // Default: no signal found, reject
+    return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective',
+             reason: 'rejected_assistant_no_memory_signal' };
   }
 
   if (role === 'user') {
@@ -460,7 +735,8 @@ async function handleClassifyTurn(data: ClassifyTurnData): Promise<void> {
         volatility: result.volatility,
       },
       discarded: true,
-      discardReason: 'classification returned null memoryType',
+      discardReason: result.reason ?? 'classification returned null memoryType',
+      classificationReason: result.reason,
     });
     return;
   }
@@ -479,6 +755,7 @@ async function handleClassifyTurn(data: ClassifyTurnData): Promise<void> {
       volatility: result.volatility,
     },
     discarded: false,
+    classificationReason: result.reason,
   });
 
   await ingestionQueue.add('embed-and-promote', {

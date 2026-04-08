@@ -157,6 +157,7 @@ export interface IngestionDebugEvent {
   };
   discarded: boolean;
   discardReason?: string;
+  classificationReason?: string;
   inserted?: {
     memoryId: string;
     memoryType: string;
