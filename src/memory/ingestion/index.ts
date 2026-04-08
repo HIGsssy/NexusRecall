@@ -84,6 +84,12 @@ interface ClassificationResult {
   importance: number;
   confidence: ConfidenceLevel;
   volatility: VolatilityLevel;
+  distilledContent?: string;
+}
+
+interface SemanticFactDetection {
+  distilledText: string;
+  importance: number;
 }
 
 const SELF_REFERENTIAL_PATTERNS: readonly string[] = [
@@ -160,6 +166,32 @@ const COMMITMENT_EXCLUSION_PATTERNS: readonly string[] = [
   'if you\'d like',
 ];
 
+// --- User Semantic Fact Detection ---
+
+const USER_FACT_HEDGING_REJECTION: readonly string[] = [
+  'i think', 'i guess', 'maybe', 'probably', 'sort of',
+  'kind of', 'might', 'usually', 'sometimes',
+];
+
+const USER_FACT_IDENTITY_EXCLUSIONS: readonly string[] = [
+  'bit ', 'little ', 'lot ', 'bad ', 'good ', 'real ', 'very ',
+];
+
+const USER_SEMANTIC_FACT_RULES: readonly { pattern: RegExp; distill: (m: RegExpMatchArray) => string }[] = [
+  { pattern: /^i love\b(.+)/i,              distill: (m) => `User loves${m[1]}` },
+  { pattern: /^i like\b(.+)/i,              distill: (m) => `User likes${m[1]}` },
+  { pattern: /^i hate\b(.+)/i,              distill: (m) => `User hates${m[1]}` },
+  { pattern: /^i dislike\b(.+)/i,           distill: (m) => `User dislikes${m[1]}` },
+  { pattern: /^i prefer\b(.+)/i,            distill: (m) => `User prefers${m[1]}` },
+  { pattern: /^my favou?rite\b(.+)/i,       distill: (m) => `User's favorite${m[1]}` },
+  { pattern: /^i work (?:at|for)\b(.+)/i,   distill: (m) => `User works at${m[1]}` },
+  { pattern: /^i work as\b(.+)/i,           distill: (m) => `User works as${m[1]}` },
+  { pattern: /^my job is\b(.+)/i,           distill: (m) => `User's job is${m[1]}` },
+  { pattern: /^i live in\b(.+)/i,           distill: (m) => `User lives in${m[1]}` },
+  { pattern: /^i(?:'m| am) from\b(.+)/i,    distill: (m) => `User is from${m[1]}` },
+  { pattern: /^i(?:'m| am) an?\\b(.+)/i,     distill: (m) => `User is ${m[0].match(/\ban\b/i) ? 'an' : 'a'}${m[1]}` },
+];
+
 function isSelfReferential(contentLower: string): boolean {
   return SELF_REFERENTIAL_PATTERNS.some(p => contentLower.includes(p));
 }
@@ -194,6 +226,30 @@ function isCommitment(contentLower: string, content: string): boolean {
   return COMMITMENT_PATTERNS.some(p => contentLower.includes(p));
 }
 
+function detectUserSemanticFact(lower: string, raw: string): SemanticFactDetection | null {
+  if (isQuestion(raw)) return null;
+  if (USER_FACT_HEDGING_REJECTION.some(p => lower.includes(p))) return null;
+
+  for (let i = 0; i < USER_SEMANTIC_FACT_RULES.length; i++) {
+    const rule = USER_SEMANTIC_FACT_RULES[i];
+    const match = raw.match(rule.pattern);
+    if (!match) continue;
+
+    const captured = match[1].trim();
+    if (!captured) continue;
+
+    // Rule 12 (last rule): identity pattern — reject transient adjective phrases
+    if (i === USER_SEMANTIC_FACT_RULES.length - 1) {
+      const capturedLower = captured.toLowerCase();
+      if (USER_FACT_IDENTITY_EXCLUSIONS.some(ex => capturedLower.startsWith(ex))) continue;
+    }
+
+    return { distilledText: rule.distill(match), importance: 0.75 };
+  }
+
+  return null;
+}
+
 function classify(role: 'user' | 'assistant', content: string): ClassificationResult {
   const trimmed = content.trim();
   const lower = trimmed.toLowerCase();
@@ -222,6 +278,17 @@ function classify(role: 'user' | 'assistant', content: string): ClassificationRe
   }
 
   if (role === 'user') {
+    const factDetection = detectUserSemanticFact(lower, trimmed);
+    if (factDetection) {
+      return {
+        memoryType: 'semantic',
+        importance: factDetection.importance,
+        confidence: 'explicit',
+        volatility: 'factual',
+        distilledContent: factDetection.distilledText,
+      };
+    }
+
     if (trimmed.length < config.classifierMinEpisodicLength) {
       return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
     }
@@ -418,7 +485,7 @@ async function handleClassifyTurn(data: ClassifyTurnData): Promise<void> {
     exchangeId: exchange.id,
     userId: data.userId,
     personaId: data.personaId,
-    content: exchange.content,
+    content: result.distilledContent ?? exchange.content,
     memoryType: result.memoryType,
     importance: result.importance,
     confidence: result.confidence,
