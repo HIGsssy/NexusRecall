@@ -50,6 +50,11 @@ export interface Config {
   // Ingestion / lifecycle
   exchangeRetentionDays: number;
 
+  // Safety valve
+  safetyValveEnabled: boolean;
+  safetyValveSimilarityThreshold: number;
+  safetyValveMinKeyTermOverlap: number;
+
   // Observability
   logLevel: LogLevel;
 
@@ -175,6 +180,14 @@ function loadConfig(): Config {
   const classifierMinEpisodicLength = parsePositiveInt('CLASSIFIER_MIN_EPISODIC_LENGTH', process.env['CLASSIFIER_MIN_EPISODIC_LENGTH'], 50);
   const exchangeRetentionDays = parsePositiveInt('EXCHANGE_RETENTION_DAYS', process.env['EXCHANGE_RETENTION_DAYS'], 90);
 
+  const safetyValveEnabled = process.env['SAFETY_VALVE_ENABLED'] === 'true';
+
+  const safetyValveSimilarityThresholdRaw = process.env['SAFETY_VALVE_SIMILARITY_THRESHOLD'];
+  const safetyValveSimilarityThreshold = safetyValveSimilarityThresholdRaw !== undefined && safetyValveSimilarityThresholdRaw !== ''
+    ? Number(safetyValveSimilarityThresholdRaw) : 0.9;
+
+  const safetyValveMinKeyTermOverlap = parsePositiveInt('SAFETY_VALVE_MIN_KEY_TERM_OVERLAP', process.env['SAFETY_VALVE_MIN_KEY_TERM_OVERLAP'], 2);
+
   const contradictionSimilarityThreshold = parseFloatInRange('CONTRADICTION_SIMILARITY_THRESHOLD', process.env['CONTRADICTION_SIMILARITY_THRESHOLD'], 0.92);
 
   const similarityThresholdSemantic = parseFloatInRange('SIMILARITY_THRESHOLD_SEMANTIC', process.env['SIMILARITY_THRESHOLD_SEMANTIC'], 0.75);
@@ -210,6 +223,9 @@ function loadConfig(): Config {
     classifierMinEpisodicLength,
     contradictionSimilarityThreshold,
     exchangeRetentionDays,
+    safetyValveEnabled,
+    safetyValveSimilarityThreshold,
+    safetyValveMinKeyTermOverlap,
     logLevel,
     apiPort,
   };

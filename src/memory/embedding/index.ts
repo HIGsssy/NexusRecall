@@ -6,7 +6,7 @@
 import { createHash } from 'crypto';
 import { config } from '../../config';
 import { getEmbedding, setEmbedding } from '../cache';
-import { canonicalizeDialect } from '../normalization';
+import { canonicalizeDialect, canonicalizeForEmbedding } from '../normalization';
 import type { EmbeddingVector } from '../models';
 
 // --- Typed Error ---
@@ -149,11 +149,11 @@ export async function embed(text: string, _sessionId?: string): Promise<Embeddin
   // 1. Canonicalize dialect spelling (British/Canadian → American)
   const canonicalText = canonicalizeDialect(text);
 
-  // 2. Normalize for hashing only
-  const normalizedText = canonicalText.trim().toLowerCase();
+  // 2. Normalize for hashing only (full canonicalization)
+  const hashText = canonicalizeForEmbedding(text);
 
   // 3. Compute hash
-  const textHash = createHash('sha256').update(normalizedText).digest('hex');
+  const textHash = createHash('sha256').update(hashText).digest('hex');
 
   // 4. Check embedding cache
   const cached = await getEmbedding(textHash);

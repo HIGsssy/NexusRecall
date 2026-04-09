@@ -46,3 +46,12 @@ export function canonicalizeDialect(text: string): string {
   }
   return result;
 }
+
+export function canonicalizeForEmbedding(text: string): string {
+  let result = text.trim();
+  result = result.toLowerCase();
+  result = result.replace(/\s+/g, ' ');
+  result = result.replace(/[.,!?;:]+$/, '');
+  result = canonicalizeDialect(result);
+  return result;
+}

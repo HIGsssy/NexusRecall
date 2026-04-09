@@ -1,8 +1,18 @@
 import { Router } from 'express';
 import { storeMemory } from '../../memory/service';
 import { getIngestionDebugLog } from '../../memory/ingestion';
+import { getClassificationMetrics, resetClassificationMetrics } from '../../memory/ingestion/metrics';
 
 const router = Router();
+
+router.get('/ingest/metrics', (req, res) => {
+  const reset = req.query.reset === 'true';
+  if (reset) {
+    res.json(resetClassificationMetrics());
+  } else {
+    res.json(getClassificationMetrics());
+  }
+});
 
 router.get('/ingest/debug', (_req, res) => {
   const userId = _req.query.user_id as string | undefined;

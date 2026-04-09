@@ -158,6 +158,10 @@ export interface IngestionDebugEvent {
   discarded: boolean;
   discardReason?: string;
   classificationReason?: string;
+  nearMiss?: { nearMatch: string; pattern: string; failedCondition: string };
+  overrideApplied?: boolean;
+  overrideReason?: string;
+  overrideSimilarity?: number;
   inserted?: {
     memoryId: string;
     memoryType: string;

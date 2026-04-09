@@ -14,6 +14,7 @@ import {
   deleteAllUserDataFromDb,
   findContradictionCandidates,
   markSuperseded,
+  fetchCandidates,
 } from '../../db/queries/memories';
 import { invalidateRetrievalCache, setCooldown, deleteUserRedisState } from '../cache';
 import { embed } from '../embedding';
@@ -28,6 +29,7 @@ import type {
   UpdateMemoryResult,
   IngestionDebugEvent,
 } from '../models';
+import { recordClassification, recordOverride } from './metrics';
 
 // --- Ingestion Debug Ring Buffer ---
 
@@ -86,6 +88,19 @@ interface ClassificationResult {
   volatility: VolatilityLevel;
   distilledContent?: string;
   reason?: string;
+  nearMiss?: NearMissInfo;
+}
+
+interface NearMissInfo {
+  nearMatch: string;
+  pattern: string;
+  failedCondition: string;
+}
+
+interface SignalEvaluationResult {
+  matched: boolean;
+  signal?: AssistantSignalDetection;
+  nearMiss?: NearMissInfo;
 }
 
 interface SemanticFactDetection {
@@ -331,6 +346,110 @@ function hasNarrativeFluff(contentLower: string): boolean {
   return false;
 }
 
+function diagnoseFailed(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length < 8) return 'distillation_too_short';
+  if (trimmed.endsWith('...')) return 'distillation_trailing_ellipsis';
+  if (/^[,;:\-—–.!?]/.test(trimmed)) return 'distillation_leading_punctuation';
+  return 'distillation_unknown';
+}
+
+const NEAR_MISS_FACT_KEYWORDS = ['favorite', 'favourite', 'prefer', 'live in', 'work at', 'work for', 'work as', 'allergic'];
+const NEAR_MISS_SUMMARY_KEYWORDS = ['summarize', 'key point', 'bottom line', 'takeaway', 'in summary'];
+
+function evaluateAssistantSignals(content: string): SignalEvaluationResult {
+  type RuleFamily = {
+    rules: readonly { pattern: RegExp; distill: (m: RegExpMatchArray) => string }[];
+    signalType: string;
+    memoryType: MemoryType;
+    importance: number;
+    confidence: ConfidenceLevel;
+    volatility: VolatilityLevel;
+    reason: string;
+  };
+
+  const families: RuleFamily[] = [
+    { rules: ASSISTANT_USER_FACT_RULES, signalType: 'user_fact_restatement',
+      memoryType: 'semantic', importance: 0.7, confidence: 'explicit', volatility: 'factual',
+      reason: 'stored_assistant_semantic_distilled' },
+    { rules: ASSISTANT_CONFIRMATION_RULES, signalType: 'confirmation',
+      memoryType: 'semantic', importance: 0.65, confidence: 'inferred', volatility: 'factual',
+      reason: 'stored_assistant_confirmation_distilled' },
+    { rules: ASSISTANT_CORRECTION_RULES, signalType: 'correction',
+      memoryType: 'semantic', importance: 0.65, confidence: 'inferred', volatility: 'factual',
+      reason: 'stored_assistant_conclusion_distilled' },
+    { rules: ASSISTANT_SUMMARY_RULES, signalType: 'summary',
+      memoryType: 'semantic', importance: 0.65, confidence: 'inferred', volatility: 'factual',
+      reason: 'stored_assistant_summary_distilled' },
+  ];
+
+  let firstNearMiss: NearMissInfo | undefined;
+
+  for (const family of families) {
+    for (const rule of family.rules) {
+      const match = content.match(rule.pattern);
+      if (!match) continue;
+
+      const distilled = rule.distill(match);
+
+      if (!match[1] || match[1].trim().length === 0) {
+        if (!firstNearMiss) {
+          firstNearMiss = {
+            nearMatch: family.signalType,
+            pattern: rule.pattern.source,
+            failedCondition: 'empty_capture',
+          };
+        }
+        continue;
+      }
+
+      if (!isValidDistillation(distilled)) {
+        if (!firstNearMiss) {
+          firstNearMiss = {
+            nearMatch: family.signalType,
+            pattern: rule.pattern.source,
+            failedCondition: diagnoseFailed(distilled),
+          };
+        }
+        continue;
+      }
+
+      return {
+        matched: true,
+        signal: {
+          signalType: family.signalType,
+          distilledText: distilled,
+          memoryType: family.memoryType,
+          importance: family.importance,
+          confidence: family.confidence,
+          volatility: family.volatility,
+          reason: family.reason,
+        },
+      };
+    }
+  }
+
+  // Keyword heuristic fallback — only if no near-miss was captured
+  if (!firstNearMiss) {
+    const lower = content.toLowerCase();
+    if (NEAR_MISS_FACT_KEYWORDS.some(kw => lower.includes(kw))) {
+      firstNearMiss = {
+        nearMatch: 'user_fact',
+        pattern: 'keyword_heuristic',
+        failedCondition: 'keyword_present_but_pattern_mismatch',
+      };
+    } else if (NEAR_MISS_SUMMARY_KEYWORDS.some(kw => lower.includes(kw))) {
+      firstNearMiss = {
+        nearMatch: 'summary',
+        pattern: 'keyword_heuristic',
+        failedCondition: 'keyword_present_but_pattern_mismatch',
+      };
+    }
+  }
+
+  return { matched: false, nearMiss: firstNearMiss };
+}
+
 function detectAssistantMemorySignal(content: string): AssistantSignalDetection | null {
   // Family evaluation order: user-fact > confirmation > correction > summary
   // Within each family: top-to-bottom, first valid distillation wins
@@ -523,15 +642,15 @@ function classify(role: 'user' | 'assistant', content: string): ClassificationRe
     }
 
     // Assistant memory signal detection (replaces semantic catch-all)
-    const signal = detectAssistantMemorySignal(trimmed);
-    if (signal) {
+    const evalResult = evaluateAssistantSignals(trimmed);
+    if (evalResult.matched && evalResult.signal) {
       return {
-        memoryType: signal.memoryType,
-        importance: signal.importance,
-        confidence: signal.confidence,
-        volatility: signal.volatility,
-        distilledContent: signal.distilledText,
-        reason: signal.reason,
+        memoryType: evalResult.signal.memoryType,
+        importance: evalResult.signal.importance,
+        confidence: evalResult.signal.confidence,
+        volatility: evalResult.signal.volatility,
+        distilledContent: evalResult.signal.distilledText,
+        reason: evalResult.signal.reason,
       };
     }
 
@@ -539,17 +658,17 @@ function classify(role: 'user' | 'assistant', content: string): ClassificationRe
     const fillerMatch = isAssistantFiller(lower);
     if (fillerMatch) {
       return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective',
-               reason: 'rejected_assistant_filler' };
+               reason: 'rejected_assistant_filler', nearMiss: evalResult.nearMiss };
     }
 
     if (hasNarrativeFluff(lower)) {
       return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective',
-               reason: 'rejected_assistant_narrative_fluff' };
+               reason: 'rejected_assistant_narrative_fluff', nearMiss: evalResult.nearMiss };
     }
 
     // Default: no signal found, reject
     return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective',
-             reason: 'rejected_assistant_no_memory_signal' };
+             reason: 'rejected_assistant_no_memory_signal', nearMiss: evalResult.nearMiss };
   }
 
   if (role === 'user') {
@@ -576,6 +695,85 @@ function classify(role: 'user' | 'assistant', content: string): ClassificationRe
   }
 
   return { memoryType: null, importance: 0, confidence: 'inferred', volatility: 'subjective' };
+}
+
+// --- Safety Valve ---
+
+const STOP_WORDS = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'it', 'that', 'this',
+  'to', 'of', 'in', 'for', 'and', 'or', 'but', 'i', 'you', 'my', 'your', 'we',
+]);
+
+const SAFETY_VALVE_NON_RESCUABLE = new Set([
+  'rejected_assistant_too_short',
+  'rejected_assistant_question',
+  'rejected_assistant_greeting',
+]);
+
+function hasKeyTermOverlap(contentA: string, contentB: string, minOverlap: number): boolean {
+  const tokenize = (s: string): Set<string> => {
+    const tokens = s.toLowerCase().split(/\s+/).filter(t => t.length >= 3 && !STOP_WORDS.has(t));
+    return new Set(tokens);
+  };
+  const setA = tokenize(contentA);
+  const setB = tokenize(contentB);
+  let count = 0;
+  for (const token of setA) {
+    if (setB.has(token)) {
+      count++;
+      if (count >= minOverlap) return true;
+    }
+  }
+  return false;
+}
+
+interface SafetyValveResult {
+  override: boolean;
+  similarity?: number;
+  matchedMemoryId?: string;
+}
+
+const CONFIRMATION_TOKEN_RE = /\b(?:yes|yeah|correct|right|exactly|that's (?:right|correct))\b/i;
+
+async function attemptHighSimilarityOverride(
+  userId: string,
+  personaId: string,
+  content: string,
+  result: ClassificationResult
+): Promise<SafetyValveResult> {
+  if (!config.safetyValveEnabled) return { override: false };
+  if (result.reason && SAFETY_VALVE_NON_RESCUABLE.has(result.reason)) return { override: false };
+
+  const embedding = await embed(content);
+  const rawCandidates = await fetchCandidates(userId, personaId, embedding, 5);
+
+  let bestId: string | null = null;
+  let bestSimilarity = -1;
+  let bestContent = '';
+
+  for (const candidate of rawCandidates) {
+    const candidateEmbedding = parseVector(candidate.embedding as string);
+    const similarity = cosineSimilarity(embedding, candidateEmbedding);
+    if (similarity > config.safetyValveSimilarityThreshold && similarity > bestSimilarity) {
+      bestId = candidate.id as string;
+      bestSimilarity = similarity;
+      bestContent = candidate.content as string;
+    }
+  }
+
+  if (bestId === null) return { override: false };
+
+  if (!hasKeyTermOverlap(content, bestContent, config.safetyValveMinKeyTermOverlap)) {
+    recordOverride(true);
+    return { override: false };
+  }
+
+  if (CONFIRMATION_TOKEN_RE.test(content) || bestSimilarity > 0.95) {
+    recordOverride(false);
+    return { override: true, similarity: bestSimilarity, matchedMemoryId: bestId };
+  }
+
+  return { override: false };
 }
 
 // --- Contradiction Helper ---
@@ -721,6 +919,48 @@ async function handleClassifyTurn(data: ClassifyTurnData): Promise<void> {
   const summary = exchange.content.length > 120 ? exchange.content.slice(0, 120) + '...' : exchange.content;
 
   if (result.memoryType === null) {
+    // Safety valve: attempt high-similarity override for assistant messages
+    if (exchange.role === 'assistant') {
+      const override = await attemptHighSimilarityOverride(
+        data.userId, data.personaId, exchange.content, result
+      );
+      if (override.override) {
+        recordClassification('assistant', 'high_similarity_confirmation_override', true);
+        pushIngestionDebug({
+          timestamp: new Date().toISOString(),
+          userId: data.userId,
+          personaId: data.personaId,
+          exchangeId: exchange.id,
+          role: exchange.role,
+          contentSummary: summary,
+          classification: {
+            memoryType: 'semantic',
+            importance: 0.5,
+            confidence: 'inferred',
+            volatility: 'subjective',
+          },
+          discarded: false,
+          classificationReason: 'high_similarity_confirmation_override',
+          overrideApplied: true,
+          overrideReason: 'high_similarity_confirmation_override',
+          overrideSimilarity: override.similarity,
+          nearMiss: result.nearMiss,
+        });
+        await ingestionQueue.add('embed-and-promote', {
+          exchangeId: exchange.id,
+          userId: data.userId,
+          personaId: data.personaId,
+          content: exchange.content,
+          memoryType: 'semantic' as MemoryType,
+          importance: 0.5,
+          confidence: 'inferred' as ConfidenceLevel,
+          volatility: 'subjective' as VolatilityLevel,
+        } satisfies EmbedAndPromoteData);
+        return;
+      }
+    }
+
+    recordClassification(exchange.role, result.reason ?? 'unknown', false);
     pushIngestionDebug({
       timestamp: new Date().toISOString(),
       userId: data.userId,
@@ -737,10 +977,12 @@ async function handleClassifyTurn(data: ClassifyTurnData): Promise<void> {
       discarded: true,
       discardReason: result.reason ?? 'classification returned null memoryType',
       classificationReason: result.reason,
+      nearMiss: result.nearMiss,
     });
     return;
   }
 
+  recordClassification(exchange.role, result.reason ?? 'unknown', true);
   pushIngestionDebug({
     timestamp: new Date().toISOString(),
     userId: data.userId,
